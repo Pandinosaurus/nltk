@@ -1,8 +1,8 @@
 # Natural Language Toolkit: Carnegie Mellon Pronouncing Dictionary Corpus Reader
 #
-# Copyright (C) 2001-2021 NLTK Project
+# Copyright (C) 2001-2026 NLTK Project
 # Author: Steven Bird <stevenbird1@gmail.com>
-# URL: <http://nltk.org/>
+# URL: <https://www.nltk.org/>
 # For license information, see LICENSE.TXT
 
 """
@@ -54,7 +54,7 @@ class CMUDictCorpusReader(CorpusReader):
     def entries(self):
         """
         :return: the cmudict lexicon as a list of entries
-        containing (word, transcriptions) tuples.
+            containing (word, transcriptions) tuples.
         """
         return concat(
             [
@@ -72,7 +72,7 @@ class CMUDictCorpusReader(CorpusReader):
     def dict(self):
         """
         :return: the cmudict lexicon as a dictionary, whose keys are
-        lowercase words and whose values are lists of pronunciations.
+            lowercase words and whose values are lists of pronunciations.
         """
         return dict(Index(self.entries()))
 
@@ -84,5 +84,10 @@ def read_cmudict_block(stream):
         if line == "":
             return entries  # end of file.
         pieces = line.split()
+        # A blank / whitespace-only line carries no entry; skipping it avoids an
+        # IndexError on ``pieces[0]`` that would otherwise abort iteration over
+        # the whole corpus.
+        if not pieces:
+            continue
         entries.append((pieces[0].lower(), pieces[2:]))
     return entries

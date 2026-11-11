@@ -3,7 +3,7 @@ Mock test for Stanford CoreNLP wrappers.
 """
 
 from unittest import TestCase
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -14,26 +14,29 @@ from nltk.tree import Tree
 def setup_module(module):
     global server
 
+    # Bind an ephemeral port, never the default 9000 which races under xdist
+    # (CI runs pytest --numprocesses auto). The tests mock api_call, so nothing
+    # connects to this server; it only proves CoreNLP can start.
+    port = corenlp.try_port()
+
     try:
-        server = CoreNLPServer(port=9000)
+        server = corenlp.CoreNLPServer(port=port)
     except LookupError:
-        pytest.skip("Could not instantiate CoreNLPServer.")
+        pytest.fail(
+            "CoreNLP is required for these tests but its jars were not found; "
+            "install it under nltk_data or the repo 'third/' dir."
+        )
 
     try:
         server.start()
-    except CoreNLPServerError as e:
-        pytest.skip(
-            "Skipping CoreNLP tests because the server could not be started. "
-            "Make sure that the 9000 port is free. "
-            "{}".format(e.strerror)
-        )
+    except corenlp.CoreNLPServerError as e:
+        pytest.fail(f"CoreNLP server failed to start: {e}")
 
 
 def teardown_module(module):
     server.stop()
 
 
-@pytest.mark.skip(reason="Skipping all CoreNLP tests.")
 class TestTokenizerAPI(TestCase):
     def test_tokenize(self):
         corenlp_tokenizer = corenlp.CoreNLPParser()
@@ -253,7 +256,6 @@ class TestTokenizerAPI(TestCase):
         self.assertEqual(expected_output, tokenized_output)
 
 
-@pytest.mark.skip(reason="Skipping all CoreNLP tests.")
 class TestTaggerAPI(TestCase):
     def test_pos_tagger(self):
         corenlp_tagger = corenlp.CoreNLPParser(tagtype="pos")
@@ -583,6 +585,8 @@ class TestTaggerAPI(TestCase):
             properties={
                 "ssplit.isOneSentence": "true",
                 "annotators": "tokenize,ssplit,pos",
+                "tokenize.whitespace": "true",
+                "ner.useSUTime": "false",
             },
         )
         self.assertEqual(expected_output, tagged_output)
@@ -742,6 +746,8 @@ class TestTaggerAPI(TestCase):
             properties={
                 "ssplit.isOneSentence": "true",
                 "annotators": "tokenize,ssplit,ner",
+                "tokenize.whitespace": "true",
+                "ner.useSUTime": "false",
             },
         )
         self.assertEqual(expected_output, tagged_output)
@@ -751,7 +757,6 @@ class TestTaggerAPI(TestCase):
             corenlp_tagger = corenlp.CoreNLPParser(tagtype="test")
 
 
-@pytest.mark.skip(reason="Skipping all CoreNLP tests.")
 class TestParserAPI(TestCase):
     def test_parse(self):
         corenlp_parser = corenlp.CoreNLPParser()
@@ -1437,3 +1442,28 @@ class TestParserAPI(TestCase):
             properties={"ssplit.eolonly": "true"},
         )
         self.assertEqual(expected_output, parsed_data.tree())
+
+
+class TestServerAPI(TestCase):
+    @patch("nltk.parse.corenlp.time.sleep")
+    @patch("requests.get")
+    @patch("nltk.parse.corenlp.java")
+    def test_start_retry_ordering(self, mock_java, mock_get, mock_sleep):
+        # 1. Setup HTTP sequence:
+        #    /live fails once then succeeds, followed by /ready failing once then succeeding.
+        mock_get.side_effect = [
+            MagicMock(ok=False),  # /live attempt 1 (fails)
+            MagicMock(ok=True),  # /live attempt 2 (succeeds)
+            MagicMock(ok=False),  # /ready attempt 1 (fails)
+            MagicMock(ok=True),  # /ready attempt 2 (succeeds)
+        ]
+
+        # 2. Prevent a real JVM from launching
+        mock_java.return_value.poll.return_value = None
+
+        # 3. Instantiate normally on an unused port
+        test_server = corenlp.CoreNLPServer(port=9999)
+        test_server.start()
+
+        # 4. Verify sleep was called exactly twice (once in the /live loop, once in the /ready loop)
+        self.assertEqual(mock_sleep.call_count, 2)

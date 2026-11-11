@@ -1,9 +1,9 @@
 # Natural Language Toolkit: Applications package
 #
-# Copyright (C) 2001-2021 NLTK Project
+# Copyright (C) 2001-2026 NLTK Project
 # Author: Edward Loper <edloper@gmail.com>
 #         Steven Bird <stevenbird1@gmail.com>
-# URL: <http://nltk.org/>
+# URL: <https://www.nltk.org/>
 # For license information, see LICENSE.TXT
 
 """
@@ -18,7 +18,6 @@ rdparser:     Recursive Descent Parser
 srparser:     Shift-Reduce Parser
 wordnet:      WordNet Browser
 """
-
 
 # Import Tkinter-based modules if Tkinter is installed
 try:

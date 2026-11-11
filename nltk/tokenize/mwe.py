@@ -1,8 +1,8 @@
 # Multi-Word Expression tokenizer
 #
-# Copyright (C) 2001-2021 NLTK Project
+# Copyright (C) 2001-2026 NLTK Project
 # Author: Rob Malouf <rmalouf@mail.sdsu.edu>
-# URL: <http://nltk.org/>
+# URL: <https://www.nltk.org/>
 # For license information, see LICENSE.TXT
 
 """
@@ -28,6 +28,7 @@ of MWEs:
     ['In', 'a_little', 'or', 'a_little_bit', 'or', 'a_lot', 'in_spite_of']
 
 """
+
 from nltk.tokenize.api import TokenizerI
 from nltk.util import Trie
 

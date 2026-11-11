@@ -110,6 +110,7 @@
 - Tom Lippincott
 - Peter Ljunglöf
 - Alex Louden
+- David Lukeš
 - Joseph Lynch
 - Nitin Madnani
 - Felipe Madrigal
@@ -127,6 +128,7 @@
 - David McClosky
 - Xinfan Meng
 - Dmitrijs Milajevs
+- Matt Miller
 - Margaret Mitchell
 - Tomonori Nagano
 - Jason Narad
@@ -183,12 +185,14 @@
 - Zhe Wang
 - Charlotte Wilson
 - Chuck Wooters
+- Huanyi Xie
 - Steven Xu
 - Beracah Yankama
 - Lei Ye (叶磊)
 - Patrick Ye
 - Geraldine Sim Wei Ying
 - Jason Yoder
+- Mingzhe Yu (UnbearableFate)
 - Thomas Zieglier
 - 0ssifrage
 - ducki13
@@ -201,6 +205,7 @@
 - Álvaro Justen <https://github.com/turicas>
 - bjut-hz
 - Sergio Oller
+- Izam Mohammed <https://github.com/izam-mohammed>
 - Will Monroe
 - Elijah Rippeth
 - Emil Manukyan
@@ -280,6 +285,84 @@
 - Hiroki Teranishi <https://github.com/chantera>
 - Ruben Cartuyvels <https://github.com/rubencart>
 - Dalton Pearson <https://github.com/daltonpearson>
+- Robby Horvath <https://github.com/robbyhorvath>
+- Gavish Poddar <https://github.com/gavishpoddar>
+- Saibo Geng <https://github.com/Saibo-creator>
+- Ahmet Yildirim <https://github.com/RnDevelover>
+- Yuta Nakamura <https://github.com/yutanakamura-tky>
+- Adam Hawley <https://github.com/adamjhawley>
+- Panagiotis Simakis <https://github.com/sp1thas>
+- Richard Wang <https://github.com/richarddwang>
+- Alexandre Perez-Lebel <https://github.com/aperezlebel>
+- Fernando Carranza <https://github.com/fernandocar86>
+- Martin Kondratzky <https://github.com/martinkondra>
+- Heungson Lee <https://github.com/heungson>
+- M.K. Pawelkiewicz <https://github.com/hamiltonianflow>
+- Steven Thomas Smith <https://github.com/essandess>
+- Jan Lennartz <https://github.com/Madnex>
+- Tim Sockel <https://github.com/TiMauzi>
+- Ikram Ul Haq <https://github.com/ulhaqi12>
+- Akihiro Yamazaki <https://github.com/zakkie>
+- Ron Urbach <https://github.com/sharpblade4>
+- Vivek Kalyan <https://github.com/vivekkalyan>
+- Tom Strange https://github.com/strangetom
+- Vincent Peth <https://github.com/ShadokDuBas>
+- Samer Masterson <https://github.com/samertm>
+- William LaCroix <https://github.com/WilliamPLaCroix>
+- Peter de Blanc <https://github.com/pdeblanc>
+- Jose Cols <https://github.com/josecols>
+- Christopher Smith <https://github.com/smithct2>
+- scruge1 <https://github.com/scruge1>
+- Ryan Mannion <https://github.com/ryanamannion>
+- Peter Pollak <https://github.com/Syzygy2048/>
+- John Winstead <https://github.com/jhnwnstd/>
+- Bradley Erickson <https://github.com/13rac1>
+- Volodymyr Matsko <https://github.com/Lemm1>
+- Nicola <https://github.com/trinik15>
+- medisean <https://github.com/medisean>
+- tandede <https://github.com/tandede>
+- vzer200 <https://github.com/vzer200>
+- 区梓灏 <https://github.com/Nicholas022400701>
+- Abdulmoyn Sommakieh <https://github.com/m0yn>
+- Golitsin Vyacheslav <https://github.com/webzuweb>
+- Tai An <https://github.com/Anai-Guo>
+- Raffi Enficiaud <https://github.com/raffienficiaud>
+- JJ <https://github.com/jjjutla>
+- Artemiy <https://github.com/nkoorty>
+- Cherno.x <https://github.com/Cherno-x>
+- 0xEaS <https://github.com/0xEaS1>
+- sarvesh patil <https://github.com/HyperPS>
+- Isaac David <https://github.com/zaddy6>
+- Arthur Gervais <https://github.com/arthurgervais>
+- leduckhuong <https://github.com/leduckhuong>
+- Ibrahim zain <https://github.com/ZeroXJacks>
+- Athul Jayaram <https://github.com/athuljayaram>
+- Chiencp <https://github.com/meme-dm>
+- Ziyu Lin <https://github.com/LinZiyuu>
+- Michael Lip <https://github.com/theluckystrike>
+- GOLDBERG8 <https://github.com/GOLDBERG8>
+- Litesh Ghute <https://github.com/LiteshGhute>
+- Kartik G <https://github.com/kartikganesh>
+- Thai Son Dinh <https://github.com/sondt99>
+- infy <https://github.com/infycore>
+- 0xRenSec <https://github.com/0xRenSec>
+- Joshgun Abdullayev <https://github.com/JoshgunAbdullayev>
+- Arpit Jain <https://github.com/arpitjain099>
+- Mohammad Favas S <https://github.com/ibfavas>
+- Jace <https://github.com/manus-use>
+- nguyencanhthuong <https://github.com/nguyencanhthuong>
+- haoxiang Yan <https://github.com/Yanhaoxi>
+- kokomaru167 <https://github.com/kokomaru167>
+- Yazan Balawneh <https://github.com/sonicnew>
+- jankesec <https://github.com/jankesec>
+- Daniel Coles <https://github.com/manus-pi>
+- Fodhil Benhiba <https://github.com/F0DH1L>
+- Ubaid Ur Rehman <https://github.com/askubaid>
+- Maciej Zmitrukiewicz <https://github.com/MaciejZet>
+- Syed Ahnaf Raza <https://github.com/syahra712>
+- Gecko Security <https://github.com/geckosecurity>
+- Bugbunny <https://github.com/bugbunny-research>
+- Aryan R. Ganjoo <https://github.com/AryanRG>
 
 ## Others whose work we've taken and included in NLTK, but who didn't directly contribute it:
 

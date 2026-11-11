@@ -1,10 +1,10 @@
 # Natural Language Toolkit: Feature Structures
 #
-# Copyright (C) 2001-2021 NLTK Project
+# Copyright (C) 2001-2026 NLTK Project
 # Author: Edward Loper <edloper@gmail.com>,
 #         Rob Speer,
 #         Steven Bird <stevenbird1@gmail.com>
-# URL: <http://nltk.sourceforge.net>
+# URL: <https://www.nltk.org>
 # For license information, see LICENSE.TXT
 
 """
@@ -93,6 +93,7 @@ import copy
 import re
 from functools import total_ordering
 
+from nltk import redos
 from nltk.internals import raise_unorderable_types, read_str
 from nltk.sem.logic import (
     Expression,
@@ -101,6 +102,10 @@ from nltk.sem.logic import (
     SubstituteBindingsI,
     Variable,
 )
+from nltk.termsec import safe_print
+
+#: Types that ``copy.deepcopy`` returns unchanged, without touching its memo.
+_DEEPCOPY_ATOMIC = (str, int, float, bool, type(None))
 
 ######################################################################
 # Feature Structure
@@ -160,10 +165,11 @@ class FeatStruct(SubstituteBindingsI):
 
         :param features: The initial feature values for this feature
             structure:
-              - FeatStruct(string) -> FeatStructReader().read(string)
-              - FeatStruct(mapping) -> FeatDict(mapping)
-              - FeatStruct(sequence) -> FeatList(sequence)
-              - FeatStruct() -> FeatDict()
+
+            - FeatStruct(string) -> FeatStructReader().read(string)
+            - FeatStruct(mapping) -> FeatDict(mapping)
+            - FeatStruct(sequence) -> FeatList(sequence)
+            - FeatStruct() -> FeatDict()
         :param morefeatures: If ``features`` is a mapping or None,
             then ``morefeatures`` provides additional features for the
             ``FeatDict`` constructor.
@@ -267,7 +273,7 @@ class FeatStruct(SubstituteBindingsI):
         otherwise, raise ``TypeError``.
         """
         if not self._frozen:
-            raise TypeError("FeatStructs must be frozen before they " "can be hashed.")
+            raise TypeError("FeatStructs must be frozen before they can be hashed.")
         try:
             return self._hash
         except AttributeError:
@@ -327,7 +333,7 @@ class FeatStruct(SubstituteBindingsI):
 
         # Now we have to check all values.  If any of them don't match,
         # then return false.
-        for (fname, self_fval) in self._items():
+        for fname, self_fval in self._items():
             other_fval = other[fname]
             if isinstance(self_fval, FeatStruct):
                 if not self_fval._equal(
@@ -358,7 +364,7 @@ class FeatStruct(SubstituteBindingsI):
         visited.add(id(self))
 
         hashval = 5831
-        for (fname, fval) in sorted(self._items()):
+        for fname, fval in sorted(self._items()):
             hashval *= 37
             hashval += hash(fname)
             hashval *= 37
@@ -410,7 +416,7 @@ class FeatStruct(SubstituteBindingsI):
             return
         visited.add(id(self))
         self._frozen = True
-        for (fname, fval) in sorted(self._items()):
+        for fname, fval in sorted(self._items()):
             if isinstance(fval, FeatStruct):
                 fval._freeze(visited)
 
@@ -461,9 +467,6 @@ class FeatStruct(SubstituteBindingsI):
         :param visited: A set containing the ids of all feature
             structures we've already visited while freezing.
         """
-        raise NotImplementedError()  # Implemented by subclasses.
-
-    def _walk(self, visited):
         if id(self) in visited:
             return
         visited.add(id(self))
@@ -745,8 +748,13 @@ class FeatDict(FeatStruct, dict):
 
     def __deepcopy__(self, memo):
         memo[id(self)] = selfcopy = self.__class__()
-        for (key, val) in self._items():
-            selfcopy[copy.deepcopy(key, memo)] = copy.deepcopy(val, memo)
+        for key, val in self._items():
+            # copy.deepcopy returns these as they are, so skip the call.
+            if type(key) not in _DEEPCOPY_ATOMIC:
+                key = copy.deepcopy(key, memo)
+            if type(val) not in _DEEPCOPY_ATOMIC:
+                val = copy.deepcopy(val, memo)
+            selfcopy[key] = val
         return selfcopy
 
     ##////////////////////////////////////////////////////////////
@@ -786,7 +794,7 @@ class FeatDict(FeatStruct, dict):
 
         # sorting note: keys are unique strings, so we'll never fall
         # through to comparing values.
-        for (fname, fval) in sorted(self.items()):
+        for fname, fval in sorted(self.items()):
             display = getattr(fname, "display", None)
             if id(fval) in reentrance_ids:
                 segments.append(f"{fname}->({reentrance_ids[id(fval)]})")
@@ -849,7 +857,7 @@ class FeatDict(FeatStruct, dict):
         lines = []
         # sorting note: keys are unique strings, so we'll never fall
         # through to comparing values.
-        for (fname, fval) in sorted(self.items()):
+        for fname, fval in sorted(self.items()):
             fname = ("%s" % fname).ljust(maxfnamelen)
             if isinstance(fval, Variable):
                 lines.append(f"{fname} = {fval.name}")
@@ -1024,7 +1032,10 @@ class FeatList(FeatStruct, list):
 
     def __deepcopy__(self, memo):
         memo[id(self)] = selfcopy = self.__class__()
-        selfcopy.extend(copy.deepcopy(fval, memo) for fval in self)
+        selfcopy.extend(
+            fval if type(fval) in _DEEPCOPY_ATOMIC else copy.deepcopy(fval, memo)
+            for fval in self
+        )
         return selfcopy
 
     ##////////////////////////////////////////////////////////////
@@ -1106,7 +1117,7 @@ def _substitute_bindings(fstruct, bindings, fs_class, visited):
         items = enumerate(fstruct)
     else:
         raise ValueError("Expected mapping or sequence")
-    for (fname, fval) in items:
+    for fname, fval in items:
         while isinstance(fval, Variable) and fval in bindings:
             fval = fstruct[fname] = bindings[fval]
         if isinstance(fval, fs_class):
@@ -1148,7 +1159,7 @@ def _retract_bindings(fstruct, inv_bindings, fs_class, visited):
         items = enumerate(fstruct)
     else:
         raise ValueError("Expected mapping or sequence")
-    for (fname, fval) in items:
+    for fname, fval in items:
         if isinstance(fval, fs_class):
             if id(fval) in inv_bindings:
                 fstruct[fname] = inv_bindings[id(fval)]
@@ -1176,7 +1187,7 @@ def _variables(fstruct, vars, fs_class, visited):
         items = enumerate(fstruct)
     else:
         raise ValueError("Expected mapping or sequence")
-    for (fname, fval) in items:
+    for fname, fval in items:
         if isinstance(fval, Variable):
             vars.add(fval)
         elif isinstance(fval, fs_class):
@@ -1237,12 +1248,13 @@ def rename_variables(
     if new_vars is None:
         new_vars = {}
     if vars is None:
-        vars = find_variables(fstruct, fs_class)
+        vars = own_vars = find_variables(fstruct, fs_class)
     else:
         vars = set(vars)
+        own_vars = find_variables(fstruct, fs_class)
 
     # Add our own variables to used_vars.
-    used_vars = find_variables(fstruct, fs_class).union(used_vars)
+    used_vars = own_vars.union(used_vars)
 
     # Copy ourselves, and rename variables in the copy.
     return _rename_variables(
@@ -1260,7 +1272,7 @@ def _rename_variables(fstruct, vars, used_vars, new_vars, fs_class, visited):
         items = enumerate(fstruct)
     else:
         raise ValueError("Expected mapping or sequence")
-    for (fname, fval) in items:
+    for fname, fval in items:
         if isinstance(fval, Variable):
             # If it's in new_vars, then rebind it.
             if fval in new_vars:
@@ -1284,7 +1296,15 @@ def _rename_variables(fstruct, vars, used_vars, new_vars, fs_class, visited):
 
 
 def _rename_variable(var, used_vars):
-    name, n = re.sub(r"\d+$", "", var.name), 2
+    # Strip a trailing run of digits from the variable name. The ``(?<!\d)``
+    # makes the greedy ``\d+`` fail fast: without it, a name with a long run of
+    # digits that is not at the end (e.g. ``x000...0z``) is re-scanned from every
+    # position (match ``\d+``, miss ``$``, backtrack), which is quadratic in the
+    # run length and lets a single feature-structure string pin a CPU core
+    # (CWE-1333; CVE-2026-12919). The lookbehind only lets ``\d+`` start at the
+    # beginning of a run, so interior positions fail in O(1); the result is
+    # unchanged.
+    name, n = redos.sub(r"(?<!\d)\d+$", "", var.name), 2
     if not name:
         name = "?"
     while Variable(f"{name}{n}") in used_vars:
@@ -1315,7 +1335,7 @@ def _remove_variables(fstruct, fs_class, visited):
     else:
         raise ValueError("Expected mapping or sequence")
 
-    for (fname, fval) in items:
+    for fname, fval in items:
         if isinstance(fval, Variable):
             del fstruct[fname]
         elif isinstance(fval, fs_class):
@@ -1700,7 +1720,7 @@ def _apply_forwards_to_bindings(forward, bindings):
     Replace any feature structure that has a forward pointer with
     the target of its forward pointer (to preserve reentrancy).
     """
-    for (var, value) in bindings.items():
+    for var, value in bindings.items():
         while id(value) in forward:
             value = forward[id(value)]
         bindings[var] = value
@@ -1743,27 +1763,27 @@ def _resolve_aliases(bindings):
     Replace any bound aliased vars with their binding; and replace
     any unbound aliased vars with their representative var.
     """
-    for (var, value) in bindings.items():
+    for var, value in bindings.items():
         while isinstance(value, Variable) and value in bindings:
             value = bindings[var] = bindings[value]
 
 
 def _trace_unify_start(path, fval1, fval2):
     if path == ():
-        print("\nUnification trace:")
+        safe_print("\nUnification trace:")
     else:
         fullname = ".".join("%s" % n for n in path)
-        print("  " + "|   " * (len(path) - 1) + "|")
-        print("  " + "|   " * (len(path) - 1) + "| Unify feature: %s" % fullname)
-    print("  " + "|   " * len(path) + " / " + _trace_valrepr(fval1))
-    print("  " + "|   " * len(path) + "|\\ " + _trace_valrepr(fval2))
+        safe_print("  " + "|   " * (len(path) - 1) + "|")
+        safe_print("  " + "|   " * (len(path) - 1) + "| Unify feature: %s" % fullname)
+    safe_print("  " + "|   " * len(path) + " / " + _trace_valrepr(fval1))
+    safe_print("  " + "|   " * len(path) + "|\\ " + _trace_valrepr(fval2))
 
 
 def _trace_unify_identity(path, fval1):
-    print("  " + "|   " * len(path) + "|")
-    print("  " + "|   " * len(path) + "| (identical objects)")
-    print("  " + "|   " * len(path) + "|")
-    print("  " + "|   " * len(path) + "+-->" + repr(fval1))
+    safe_print("  " + "|   " * len(path) + "|")
+    safe_print("  " + "|   " * len(path) + "| (identical objects)")
+    safe_print("  " + "|   " * len(path) + "|")
+    safe_print("  " + "|   " * len(path) + "+-->" + repr(fval1))
 
 
 def _trace_unify_fail(path, result):
@@ -1771,14 +1791,14 @@ def _trace_unify_fail(path, result):
         resume = ""
     else:
         resume = " (nonfatal)"
-    print("  " + "|   " * len(path) + "|   |")
-    print("  " + "X   " * len(path) + "X   X <-- FAIL" + resume)
+    safe_print("  " + "|   " * len(path) + "|   |")
+    safe_print("  " + "X   " * len(path) + "X   X <-- FAIL" + resume)
 
 
 def _trace_unify_succeed(path, fval1):
     # Print the result.
-    print("  " + "|   " * len(path) + "|")
-    print("  " + "|   " * len(path) + "+-->" + repr(fval1))
+    safe_print("  " + "|   " * len(path) + "|")
+    safe_print("  " + "|   " * len(path) + "+-->" + repr(fval1))
 
 
 def _trace_bindings(path, bindings):
@@ -1788,7 +1808,7 @@ def _trace_bindings(path, bindings):
         bindstr = "{%s}" % ", ".join(
             f"{var}: {_trace_valrepr(val)}" for (var, val) in binditems
         )
-        print("  " + "|   " * len(path) + "    Bindings: " + bindstr)
+        safe_print("  " + "|   " * len(path) + "    Bindings: " + bindstr)
 
 
 def _trace_valrepr(val):
@@ -1858,7 +1878,7 @@ def _default_fs_class(obj):
 
 class SubstituteBindingsSequence(SubstituteBindingsI):
     """
-    A mixin class for sequence clases that distributes variables() and
+    A mixin class for sequence classes that distributes variables() and
     substitute_bindings() over the object's elements.
     """
 
@@ -2046,6 +2066,11 @@ class Feature:
     def __hash__(self):
         return hash(self._name)
 
+    def __deepcopy__(self, memo):
+        # A feature is not changed once made, so a deep copy of a feature
+        # structure shares its feature names, as it does string names.
+        return self
+
     # ////////////////////////////////////////////////////////////
     # These can be overridden by subclasses:
     # ////////////////////////////////////////////////////////////
@@ -2070,7 +2095,7 @@ class SlashFeature(Feature):
 
 
 class RangeFeature(Feature):
-    RANGE_RE = re.compile(r"(-?\d+):(-?\d+)")
+    RANGE_RE = redos.compile(r"(-?\d+):(-?\d+)")
 
     def read_value(self, s, position, reentrances, parser):
         m = self.RANGE_RE.match(s, position)
@@ -2126,13 +2151,13 @@ class CustomFeatureValue:
         raise NotImplementedError("abstract base class")
 
     def __eq__(self, other):
-        raise NotImplementedError("abstract base class")
+        return NotImplemented
 
     def __ne__(self, other):
         return not self == other
 
     def __lt__(self, other):
-        raise NotImplementedError("abstract base class")
+        return NotImplemented
 
     def __hash__(self):
         raise TypeError("%s objects or unhashable" % self.__class__.__name__)
@@ -2197,17 +2222,17 @@ class FeatStructReader:
             self._error(s, "end of string", position)
         return value
 
-    _START_FSTRUCT_RE = re.compile(r"\s*(?:\((\d+)\)\s*)?(\??[\w-]+)?(\[)")
-    _END_FSTRUCT_RE = re.compile(r"\s*]\s*")
-    _SLASH_RE = re.compile(r"/")
-    _FEATURE_NAME_RE = re.compile(r'\s*([+-]?)([^\s\(\)<>"\'\-=\[\],]+)\s*')
-    _REENTRANCE_RE = re.compile(r"\s*->\s*")
-    _TARGET_RE = re.compile(r"\s*\((\d+)\)\s*")
-    _ASSIGN_RE = re.compile(r"\s*=\s*")
-    _COMMA_RE = re.compile(r"\s*,\s*")
-    _BARE_PREFIX_RE = re.compile(r"\s*(?:\((\d+)\)\s*)?(\??[\w-]+\s*)()")
+    _START_FSTRUCT_RE = redos.compile(r"\s*(?:\((\d+)\)\s*)?(\??[\w-]+)?(\[)")
+    _END_FSTRUCT_RE = redos.compile(r"\s*]\s*")
+    _SLASH_RE = redos.compile(r"/")
+    _FEATURE_NAME_RE = redos.compile(r'\s*([+-]?)([^\s\(\)<>"\'\-=\[\],]+)\s*')
+    _REENTRANCE_RE = redos.compile(r"\s*->\s*")
+    _TARGET_RE = redos.compile(r"\s*\((\d+)\)\s*")
+    _ASSIGN_RE = redos.compile(r"\s*=\s*")
+    _COMMA_RE = redos.compile(r"\s*,\s*")
+    _BARE_PREFIX_RE = redos.compile(r"\s*(?:\((\d+)\)\s*)?(\??[\w-]+\s*)()")
     # This one is used to distinguish fdicts from flists:
-    _START_FDICT_RE = re.compile(
+    _START_FDICT_RE = redos.compile(
         r"(%s)|(%s\s*(%s\s*(=|->)|[+-]%s|\]))"
         % (
             _BARE_PREFIX_RE.pattern,
@@ -2216,6 +2241,17 @@ class FeatStructReader:
             _FEATURE_NAME_RE.pattern,
         )
     )
+
+    #: Maximum feature-structure nesting depth accepted by the reader. The reader
+    #: is mutually recursive (``read_partial`` is re-entered once per nested
+    #: ``[...]`` / ``{...}`` / ``(...)``), with no depth guard, so a crafted deeply
+    #: nested string would raise an unhandled ``RecursionError`` (CWE-674, the
+    #: GHSA-cw6x advisory) -- reachable via ``FeatStruct(s)``,
+    #: ``FeatStructReader().fromstring(s)`` and ``FeatureGrammar.fromstring(s)``.
+    #: Real feature structures are shallow; a deeper input raises a clear
+    #: ``ValueError``. Kept well below the ~140 nesting levels at which CPython's
+    #: default recursion limit trips for this reader.
+    MAX_DEPTH = 100
 
     def read_partial(self, s, position=0, reentrances=None, fstruct=None):
         """
@@ -2431,12 +2467,28 @@ class FeatStructReader:
             return self.read_value(s, position, reentrances)
 
     def read_value(self, s, position, reentrances):
-        for (handler, regexp) in self.VALUE_HANDLERS:
-            match = regexp.match(s, position)
-            if match:
-                handler_func = getattr(self, handler)
-                return handler_func(s, position, reentrances, match)
-        raise ValueError("value", position)
+        # Bound recursion depth. Every nested value -- feature dict ``[...]``,
+        # feature list, set ``{...}`` or tuple ``(...)`` -- is read here exactly
+        # once per level, so this is the single choke point that guards all of
+        # the reader's mutually-recursive paths against an adversarially deep
+        # string (CWE-674; the GHSA-cw6x advisory). The single-arg ValueError
+        # propagates unchanged through ``read_partial``'s 2-arg handler.
+        self._depth = getattr(self, "_depth", 0) + 1
+        try:
+            if self._depth > self.MAX_DEPTH:
+                raise ValueError(
+                    f"Feature structure nesting depth exceeds MAX_DEPTH "
+                    f"({self.MAX_DEPTH}); the input may be adversarially deep. "
+                    "Raise FeatStructReader.MAX_DEPTH to allow it."
+                )
+            for handler, regexp in self.VALUE_HANDLERS:
+                match = regexp.match(s, position)
+                if match:
+                    handler_func = getattr(self, handler)
+                    return handler_func(s, position, reentrances, match)
+            raise ValueError("value", position)
+        finally:
+            self._depth -= 1
 
     def _error(self, s, expected, position):
         lines = s.split("\n")
@@ -2468,19 +2520,24 @@ class FeatStructReader:
     #: important here!)
     VALUE_HANDLERS = [
         ("read_fstruct_value", _START_FSTRUCT_RE),
-        ("read_var_value", re.compile(r"\?[a-zA-Z_][a-zA-Z0-9_]*")),
-        ("read_str_value", re.compile("[uU]?[rR]?(['\"])")),
-        ("read_int_value", re.compile(r"-?\d+")),
-        ("read_sym_value", re.compile(r"[a-zA-Z_][a-zA-Z0-9_]*")),
+        ("read_var_value", redos.compile(r"\?[a-zA-Z_][a-zA-Z0-9_]*")),
+        ("read_str_value", redos.compile("[uU]?[rR]?(['\"])")),
+        ("read_int_value", redos.compile(r"-?\d+")),
+        ("read_sym_value", redos.compile(r"[a-zA-Z_][a-zA-Z0-9_]*")),
+        # The variable names read_var_value accepts; each run of them is followed
+        # by a character it can't match, so the pattern runs in linear time.
         (
             "read_app_value",
-            re.compile(r"<(app)\((\?[a-z][a-z]*)\s*," r"\s*(\?[a-z][a-z]*)\)>"),
+            redos.compile(
+                r"<(app)\((\?[a-zA-Z_][a-zA-Z0-9_]*)\s*,"
+                r"\s*(\?[a-zA-Z_][a-zA-Z0-9_]*)\)>"
+            ),
         ),
         #       ('read_logic_value', re.compile(r'<([^>]*)>')),
         # lazily match any character after '<' until we hit a '>' not preceded by '-'
-        ("read_logic_value", re.compile(r"<(.*?)(?<!-)>")),
-        ("read_set_value", re.compile(r"{")),
-        ("read_tuple_value", re.compile(r"\(")),
+        ("read_logic_value", redos.compile(r"<(.*?)(?<!-)>")),
+        ("read_set_value", redos.compile(r"{")),
+        ("read_tuple_value", redos.compile(r"\(")),
     ]
 
     def read_fstruct_value(self, s, position, reentrances, match):
@@ -2535,7 +2592,7 @@ class FeatStructReader:
         cp = re.escape(close_paren)
         position = match.end()
         # Special syntax of empty tuples:
-        m = re.compile(r"\s*/?\s*%s" % cp).match(s, position)
+        m = redos.compile(r"\s*/?\s*%s" % cp).match(s, position)
         if m:
             return seq_class(), m.end()
         # Read values:
@@ -2543,7 +2600,7 @@ class FeatStructReader:
         seen_plus = False
         while True:
             # Close paren: return value.
-            m = re.compile(r"\s*%s" % cp).match(s, position)
+            m = redos.compile(r"\s*%s" % cp).match(s, position)
             if m:
                 if seen_plus:
                     return plus_class(values), m.end()
@@ -2555,7 +2612,7 @@ class FeatStructReader:
             values.append(val)
 
             # Comma or looking at close paren
-            m = re.compile(r"\s*(,|\+|(?=%s))\s*" % cp).match(s, position)
+            m = redos.compile(r"\s*(,|\+|(?=%s))\s*" % cp).match(s, position)
             if not m:
                 raise ValueError("',' or '+' or '%s'" % cp, position)
             if m.group(1) == "+":
@@ -2578,27 +2635,27 @@ def display_unification(fs1, fs2, indent="  "):
     else:
         blankline = "[" + " " * (len(fs1_lines[0]) - 2) + "]"
         fs1_lines += [blankline] * len(fs2_lines)
-    for (fs1_line, fs2_line) in zip(fs1_lines, fs2_lines):
-        print(indent + fs1_line + "   " + fs2_line)
-    print(indent + "-" * len(fs1_lines[0]) + "   " + "-" * len(fs2_lines[0]))
+    for fs1_line, fs2_line in zip(fs1_lines, fs2_lines):
+        safe_print(indent + fs1_line + "   " + fs2_line)
+    safe_print(indent + "-" * len(fs1_lines[0]) + "   " + "-" * len(fs2_lines[0]))
 
     linelen = len(fs1_lines[0]) * 2 + 3
-    print(indent + "|               |".center(linelen))
-    print(indent + "+-----UNIFY-----+".center(linelen))
-    print(indent + "|".center(linelen))
-    print(indent + "V".center(linelen))
+    safe_print(indent + "|               |".center(linelen))
+    safe_print(indent + "+-----UNIFY-----+".center(linelen))
+    safe_print(indent + "|".center(linelen))
+    safe_print(indent + "V".center(linelen))
 
     bindings = {}
 
     result = fs1.unify(fs2, bindings)
     if result is None:
-        print(indent + "(FAILED)".center(linelen))
+        safe_print(indent + "(FAILED)".center(linelen))
     else:
-        print(
+        safe_print(
             "\n".join(indent + l.center(linelen) for l in ("%s" % result).split("\n"))
         )
         if bindings and len(bindings.bound_variables()) > 0:
-            print(repr(bindings).center(linelen))
+            safe_print(repr(bindings).center(linelen))
     return result
 
 
@@ -2614,7 +2671,7 @@ def interactive_demo(trace=False):
     ?: Help
     """
 
-    print(
+    safe_print(
         """
     This demo will repeatedly present you with a list of feature
     structures, and ask you to choose two for unification.  Whenever a
@@ -2626,7 +2683,7 @@ def interactive_demo(trace=False):
     commands, type "?".
     """
     )
-    print('Press "Enter" to continue...')
+    safe_print('Press "Enter" to continue...')
     sys.stdin.readline()
 
     fstruct_strings = [
@@ -2652,12 +2709,12 @@ def interactive_demo(trace=False):
 
     def list_fstructs(fstructs):
         for i, fstruct in fstructs:
-            print()
+            safe_print()
             lines = ("%s" % fstruct).split("\n")
-            print("%3d: %s" % (i + 1, lines[0]))
+            safe_print("%3d: %s" % (i + 1, lines[0]))
             for line in lines[1:]:
-                print("     " + line)
-        print()
+                safe_print("     " + line)
+        safe_print()
 
     while True:
         # Pick 5 feature structures at random from the master list.
@@ -2667,15 +2724,15 @@ def interactive_demo(trace=False):
         else:
             fstructs = all_fstructs
 
-        print("_" * 75)
+        safe_print("_" * 75)
 
-        print("Choose two feature structures to unify:")
+        safe_print("Choose two feature structures to unify:")
         list_fstructs(fstructs)
 
         selected = [None, None]
-        for (nth, i) in (("First", 0), ("Second", 1)):
+        for nth, i in (("First", 0), ("Second", 1)):
             while selected[i] is None:
-                print(
+                safe_print(
                     (
                         "%s feature structure (1-%d,q,t,l,?): "
                         % (nth, len(all_fstructs))
@@ -2688,19 +2745,19 @@ def interactive_demo(trace=False):
                         return
                     if input in ("t", "T"):
                         trace = not trace
-                        print("   Trace = %s" % trace)
+                        safe_print("   Trace = %s" % trace)
                         continue
                     if input in ("h", "H", "?"):
-                        print(HELP % len(fstructs))
+                        safe_print(HELP % len(fstructs))
                         continue
                     if input in ("l", "L"):
                         list_fstructs(all_fstructs)
                         continue
                     num = int(input) - 1
                     selected[i] = all_fstructs[num][1]
-                    print()
-                except:
-                    print("Bad sentence number")
+                    safe_print()
+                except Exception:
+                    safe_print("Bad sentence number")
                     continue
 
         if trace:
@@ -2714,7 +2771,7 @@ def interactive_demo(trace=False):
             else:
                 all_fstructs.append((len(all_fstructs), result))
 
-        print('\nType "Enter" to continue unifying; or "q" to quit.')
+        safe_print('\nType "Enter" to continue unifying; or "q" to quit.')
         input = sys.stdin.readline().strip()
         if input in ("q", "Q", "x", "X"):
             return
@@ -2753,7 +2810,7 @@ def demo(trace=False):
 
     for fs1 in all_fstructs:
         for fs2 in all_fstructs:
-            print(
+            safe_print(
                 "\n*******************\nfs1 is:\n%s\n\nfs2 is:\n%s\n\nresult is:\n%s"
                 % (fs1, fs2, unify(fs1, fs2))
             )

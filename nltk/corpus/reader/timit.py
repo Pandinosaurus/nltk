@@ -4,7 +4,7 @@
 # Author: Haejoong Lee <haejoong@ldc.upenn.edu>
 #         Steven Bird <stevenbird1@gmail.com>
 #         Jacob Perkins <japerk@gmail.com>
-# URL: <http://nltk.org/>
+# URL: <https://www.nltk.org/>
 # For license information, see LICENSE.TXT
 
 # [xx] this docstring is out-of-date:
@@ -20,7 +20,7 @@ This corpus contains selected portion of the TIMIT corpus.
    are spoken by all speakers.)
  - total 160 recording of sentences (10 recordings per speaker)
  - audio format: NIST Sphere, single channel, 16kHz sampling,
-  16 bit sample, PCM encoding
+   16 bit sample, PCM encoding
 
 
 Module contents
@@ -118,11 +118,14 @@ The 4 functions are as follows.
    timit.audiodata function.
 
 """
+
 import sys
 import time
 
+from nltk import redos
 from nltk.corpus.reader.api import *
 from nltk.internals import import_from_stdlib
+from nltk.termsec import safe_print
 from nltk.tree import Tree
 
 
@@ -195,9 +198,9 @@ class TimitCorpusReader(CorpusReader):
     ):
         """
         :return: A list of the utterance identifiers for all
-        utterances in this corpus, or for the given speaker, dialect
-        region, gender, sentence type, or sentence number, if
-        specified.
+            utterances in this corpus, or for the given speaker, dialect
+            region, gender, sentence type, or sentence number, if
+            specified.
         """
         if isinstance(dialect, str):
             dialect = [dialect]
@@ -226,14 +229,14 @@ class TimitCorpusReader(CorpusReader):
     def transcription_dict(self):
         """
         :return: A dictionary giving the 'standard' transcription for
-        each word.
+            each word.
         """
         _transcriptions = {}
         with self.open("timitdic.txt") as fp:
             for line in fp:
                 if not line.strip() or line[0] == ";":
                     continue
-                m = re.match(r"\s*(\S+)\s+/(.*)/\s*$", line)
+                m = redos.match(r"\s*(\S+)\s+/(.*)/\s*$", line)
                 if not m:
                     raise ValueError("Bad line: %r" % line)
                 _transcriptions[m.group(1)] = m.group(2).split()
@@ -251,7 +254,7 @@ class TimitCorpusReader(CorpusReader):
     def spkrutteranceids(self, speaker):
         """
         :return: A list of all utterances associated with a given
-        speaker.
+            speaker.
         """
         return [
             utterance
@@ -361,20 +364,30 @@ class TimitCorpusReader(CorpusReader):
             phone_times = self.phone_times(utterance)
             sent_times = self.sent_times(utterance)
 
-            while sent_times:
-                (sent, sent_start, sent_end) = sent_times.pop(0)
+            # Walk each list with an integer cursor so the nested loops consume
+            # from the front in O(1) instead of quadratic pop(0) calls (CWE-407).
+            si = wi = pi = 0
+            while si < len(sent_times):
+                (sent, sent_start, sent_end) = sent_times[si]
+                si += 1
                 trees.append(Tree("S", []))
                 while (
-                    word_times and phone_times and phone_times[0][2] <= word_times[0][1]
+                    wi < len(word_times)
+                    and pi < len(phone_times)
+                    and phone_times[pi][2] <= word_times[wi][1]
                 ):
-                    trees[-1].append(phone_times.pop(0)[0])
-                while word_times and word_times[0][2] <= sent_end:
-                    (word, word_start, word_end) = word_times.pop(0)
+                    trees[-1].append(phone_times[pi][0])
+                    pi += 1
+                while wi < len(word_times) and word_times[wi][2] <= sent_end:
+                    (word, word_start, word_end) = word_times[wi]
+                    wi += 1
                     trees[-1].append(Tree(word, []))
-                    while phone_times and phone_times[0][2] <= word_end:
-                        trees[-1][-1].append(phone_times.pop(0)[0])
-                while phone_times and phone_times[0][2] <= sent_end:
-                    trees[-1].append(phone_times.pop(0)[0])
+                    while pi < len(phone_times) and phone_times[pi][2] <= word_end:
+                        trees[-1][-1].append(phone_times[pi][0])
+                        pi += 1
+                while pi < len(phone_times) and phone_times[pi][2] <= sent_end:
+                    trees[-1].append(phone_times[pi][0])
+                    pi += 1
         return trees
 
     # [xx] NOTE: This is currently broken -- we're assuming that the
@@ -395,7 +408,10 @@ class TimitCorpusReader(CorpusReader):
 
         # Open a new temporary file -- the wave module requires
         # an actual file, and won't work w/ stringio. :(
-        tf = tempfile.TemporaryFile()
+        # Imported here: nltk.data imports the corpus package.
+        from nltk.data import staging_tempdir
+
+        tf = tempfile.TemporaryFile(dir=staging_tempdir())
         out = wave.open(tf, "w")
 
         # Write the parameters & data to the new file.
@@ -443,14 +459,14 @@ class TimitCorpusReader(CorpusReader):
                 dsp.write(self.audiodata(utterance, start, end))
                 dsp.close()
             except OSError as e:
-                print(
+                safe_print(
                     (
                         "can't acquire the audio device; please "
                         "activate your audio device."
                     ),
                     file=sys.stderr,
                 )
-                print("system error message:", str(e), file=sys.stderr)
+                safe_print("system error message:", str(e), file=sys.stderr)
             return
         except ImportError:
             pass
@@ -471,8 +487,8 @@ class TimitCorpusReader(CorpusReader):
             pass
 
         # Method 3: complain. :)
-        print(
-            ("you must install pygame or ossaudiodev " "for audio playback."),
+        safe_print(
+            ("you must install pygame or ossaudiodev for audio playback."),
             file=sys.stderr,
         )
 

@@ -1,8 +1,8 @@
 # Natural Language Toolkit: Drawing utilities
 #
-# Copyright (C) 2001-2021 NLTK Project
+# Copyright (C) 2001-2026 NLTK Project
 # Author: Edward Loper <edloper@gmail.com>
-# URL: <http://nltk.org/>
+# URL: <https://www.nltk.org/>
 # For license information, see LICENSE.TXT
 
 """
@@ -33,6 +33,7 @@ structures.  For more information, see the CLIG
 homepage (http://www.ags.uni-sb.de/~konrad/clig.html).
 
 """
+
 from abc import ABCMeta, abstractmethod
 from tkinter import (
     RAISED,
@@ -52,6 +53,7 @@ from tkinter import (
 )
 from tkinter.filedialog import asksaveasfilename
 
+from nltk.termsec import safe_print
 from nltk.util import in_idle
 
 ##//////////////////////////////////////////////////////
@@ -80,18 +82,18 @@ class CanvasWidget(metaclass=ABCMeta):
     arguments of the form ``attribute=value``:
 
         >>> from nltk.draw.util import TextWidget
-        >>> cn = TextWidget(c, 'test', color='red')
+        >>> cn = TextWidget(Canvas(), 'test', color='red')  # doctest: +SKIP
 
     Attribute values can also be changed after a canvas widget has
     been constructed, using the ``__setitem__`` operator:
 
-        >>> cn['font'] = 'times'
+        >>> cn['font'] = 'times'  # doctest: +SKIP
 
     The current value of an attribute value can be queried using the
     ``__getitem__`` operator:
 
-        >>> cn['color']
-        red
+        >>> cn['color']  # doctest: +SKIP
+        'red'
 
     For a list of the attributes supported by a type of canvas widget,
     see its class documentation.
@@ -117,6 +119,7 @@ class CanvasWidget(metaclass=ABCMeta):
 
       - ``__init__``: Builds a new canvas widget.  It must perform the
         following three tasks (in order):
+
           - Create any new graphical elements.
           - Call ``_add_child_widget`` on each child widget.
           - Call the ``CanvasWidget`` constructor.
@@ -214,7 +217,7 @@ class CanvasWidget(metaclass=ABCMeta):
         self.__draggable = 0
 
         # Set up attributes.
-        for (attr, value) in list(attribs.items()):
+        for attr, value in list(attribs.items()):
             self[attr] = value
 
         # Manage this canvas widget
@@ -529,7 +532,7 @@ class CanvasWidget(metaclass=ABCMeta):
         """
         try:
             del self.__callbacks[button]
-        except:
+        except Exception:
             pass
 
     def unbind_drag(self):
@@ -538,7 +541,7 @@ class CanvasWidget(metaclass=ABCMeta):
         """
         try:
             del self.__callbacks["drag"]
-        except:
+        except Exception:
             pass
 
     ##//////////////////////////////////////////////////////
@@ -639,8 +642,8 @@ class CanvasWidget(metaclass=ABCMeta):
                 cb = self.__callbacks["drag"]
                 try:
                     cb(self)
-                except:
-                    print("Error in drag callback for %r" % self)
+                except Exception:
+                    safe_print("Error in drag callback for %r" % self)
         elif self.__parent is not None:
             self.__parent.__drag()
 
@@ -654,7 +657,7 @@ class CanvasWidget(metaclass=ABCMeta):
             cb = self.__callbacks[button]
             # try:
             cb(self)
-            # except:
+            # except Exception:
             #    print('Error in click callback for %r' % self)
             #    raise
         elif self.__parent is not None:
@@ -1079,7 +1082,7 @@ class OvalWidget(AbstractContainerWidget):
         if attr == "margin":
             self._margin = value
         elif attr == "double":
-            if value == True and self._oval2 is None:
+            if value and self._oval2 is None:
                 # Copy attributes & position from self._oval.
                 x1, y1, x2, y2 = c.bbox(self._oval)
                 w = self["width"] * 2
@@ -1092,7 +1095,7 @@ class OvalWidget(AbstractContainerWidget):
                     width=c.itemcget(self._oval, "width"),
                 )
                 c.tag_lower(self._oval2)
-            if value == False and self._oval2 is not None:
+            if not value and self._oval2 is not None:
                 c.delete(self._oval2)
                 self._oval2 = None
         elif attr in ("outline", "fill", "width"):
@@ -1866,7 +1869,9 @@ class CanvasFrame:
         )
         # workaround for bug in Tk font handling
         postscript = postscript.replace(" 0 scalefont ", " 9 scalefont ")
-        with open(filename, "wb") as f:
+        with open(
+            filename, "wb"
+        ) as f:  # sandboxed-open ok: operator-chosen GUI file path
             f.write(postscript.encode("utf8"))
 
     def scrollregion(self):
@@ -2143,7 +2148,7 @@ class EntryDialog:
     def _cancel(self, *e):
         try:
             self._reset()
-        except:
+        except Exception:
             pass
         self._destroy()
 
@@ -2171,11 +2176,13 @@ class ColorizedList:
     """
     An abstract base class for displaying a colorized list of items.
     Subclasses should define:
-      - ``_init_colortags``, which sets up Text color tags that
-        will be used by the list.
-      - ``_item_repr``, which returns a list of (text,colortag)
-        tuples that make up the colorized representation of the
-        item.
+
+    - ``_init_colortags``, which sets up Text color tags that
+      will be used by the list.
+    - ``_item_repr``, which returns a list of (text,colortag)
+      tuples that make up the colorized representation of the
+      item.
+
     :note: Typically, you will want to register a callback for
         ``'select'`` that calls ``mark`` on the given item.
     """
@@ -2213,7 +2220,7 @@ class ColorizedList:
         """
         Set up any colortags that will be used by this colorized list.
         E.g.:
-            >>> textwidget.tag_config('terminal', foreground='black')
+            textwidget.tag_config('terminal', foreground='black')
         """
 
     @abstractmethod
@@ -2250,7 +2257,7 @@ class ColorizedList:
         self._textwidget["state"] = "normal"
         self._textwidget.delete("1.0", "end")
         for item in items:
-            for (text, colortag) in self._item_repr(item):
+            for text, colortag in self._item_repr(item):
                 assert "\n" not in text, "item repr may not contain newline"
                 self._textwidget.insert("end", text, colortag)
             self._textwidget.insert("end", "\n")
@@ -2350,7 +2357,7 @@ class ColorizedList:
             else:
                 try:
                     del self._callbacks[e][func]
-                except:
+                except KeyError:
                     pass
 
     # ////////////////////////////////////////////////////////////

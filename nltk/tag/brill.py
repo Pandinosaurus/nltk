@@ -1,10 +1,10 @@
 # Natural Language Toolkit: Transformation-based learning
 #
-# Copyright (C) 2001-2021 NLTK Project
+# Copyright (C) 2001-2026 NLTK Project
 # Author: Marcus Uneson <marcus.uneson@gmail.com>
 #   based on previous (nltk2) version by
 #   Christopher Maloof, Edward Loper, Steven Bird
-# URL: <http://nltk.org/>
+# URL: <https://www.nltk.org/>
 # For license information, see  LICENSE.TXT
 
 from collections import Counter, defaultdict
@@ -12,6 +12,7 @@ from collections import Counter, defaultdict
 from nltk import jsontags
 from nltk.tag import TaggerI
 from nltk.tbl import Feature, Template
+from nltk.termsec import safe_print
 
 ######################################################################
 # Brill Templates
@@ -89,7 +90,7 @@ def nltkdemo18plus():
 def fntbl37():
     """
     Return 37 templates taken from the postagging task of the
-    fntbl distribution http://www.cs.jhu.edu/~rflorian/fntbl/
+    fntbl distribution https://www.cs.jhu.edu/~rflorian/fntbl/
     (37 is after excluding a handful which do not condition on Pos[0];
     fntbl can do that but the current nltk implementation cannot.)
     """
@@ -175,10 +176,10 @@ def describe_template_sets():
 
     # a bit of magic to get all functions in this module
     templatesets = inspect.getmembers(sys.modules[__name__], inspect.isfunction)
-    for (name, obj) in templatesets:
+    for name, obj in templatesets:
         if name == "describe_template_sets":
             continue
-        print(name, obj.__doc__, "\n")
+        safe_print(name, obj.__doc__, "\n")
 
 
 ######################################################################
@@ -305,12 +306,10 @@ class BrillTagger(TaggerI):
         trainscores = train_stats["rulescores"]
         assert len(trainscores) == len(
             tids
-        ), "corrupt statistics: " "{} train scores for {} rules".format(
-            trainscores, tids
-        )
+        ), f"corrupt statistics: {trainscores} train scores for {tids} rules"
         template_counts = Counter(tids)
         weighted_traincounts = Counter()
-        for (tid, score) in zip(tids, trainscores):
+        for tid, score in zip(tids, trainscores):
             weighted_traincounts[tid] += score
         tottrainscores = sum(trainscores)
 
@@ -322,21 +321,21 @@ class BrillTagger(TaggerI):
             return (tpl_value[1], repr(tpl_value[0]))
 
         def print_train_stats():
-            print(
+            safe_print(
                 "TEMPLATE STATISTICS (TRAIN)  {} templates, {} rules)".format(
                     len(template_counts), len(tids)
                 )
             )
-            print(
+            safe_print(
                 "TRAIN ({tokencount:7d} tokens) initial {initialerrors:5d} {initialacc:.4f} "
-                "final: {finalerrors:5d} {finalacc:.4f} ".format(**train_stats)
+                "final: {finalerrors:5d} {finalacc:.4f}".format(**train_stats)
             )
             head = "#ID | Score (train) |  #Rules     | Template"
-            print(head, "\n", "-" * len(head), sep="")
+            safe_print(head, "\n", "-" * len(head), sep="")
             train_tplscores = sorted(
                 weighted_traincounts.items(), key=det_tplsort, reverse=True
             )
-            for (tid, trainscore) in train_tplscores:
+            for tid, trainscore in train_tplscores:
                 s = "{} | {:5d}   {:5.3f} |{:4d}   {:.3f} | {}".format(
                     tid,
                     trainscore,
@@ -345,33 +344,33 @@ class BrillTagger(TaggerI):
                     template_counts[tid] / len(tids),
                     Template.ALLTEMPLATES[int(tid)],
                 )
-                print(s)
+                safe_print(s)
 
         def print_testtrain_stats():
             testscores = test_stats["rulescores"]
-            print(
+            safe_print(
                 "TEMPLATE STATISTICS (TEST AND TRAIN) ({} templates, {} rules)".format(
                     len(template_counts), len(tids)
                 )
             )
-            print(
+            safe_print(
                 "TEST  ({tokencount:7d} tokens) initial {initialerrors:5d} {initialacc:.4f} "
                 "final: {finalerrors:5d} {finalacc:.4f} ".format(**test_stats)
             )
-            print(
+            safe_print(
                 "TRAIN ({tokencount:7d} tokens) initial {initialerrors:5d} {initialacc:.4f} "
                 "final: {finalerrors:5d} {finalacc:.4f} ".format(**train_stats)
             )
             weighted_testcounts = Counter()
-            for (tid, score) in zip(tids, testscores):
+            for tid, score in zip(tids, testscores):
                 weighted_testcounts[tid] += score
             tottestscores = sum(testscores)
             head = "#ID | Score (test) | Score (train) |  #Rules     | Template"
-            print(head, "\n", "-" * len(head), sep="")
+            safe_print(head, "\n", "-" * len(head), sep="")
             test_tplscores = sorted(
                 weighted_testcounts.items(), key=det_tplsort, reverse=True
             )
-            for (tid, testscore) in test_tplscores:
+            for tid, testscore in test_tplscores:
                 s = "{:s} |{:5d}  {:6.3f} |  {:4d}   {:.3f} |{:4d}   {:.3f} | {:s}".format(
                     tid,
                     testscore,
@@ -382,7 +381,7 @@ class BrillTagger(TaggerI):
                     template_counts[tid] / len(tids),
                     Template.ALLTEMPLATES[int(tid)],
                 )
-                print(s)
+                safe_print(s)
 
         def print_unused_templates():
             usedtpls = {int(tid) for tid in tids}
@@ -391,19 +390,19 @@ class BrillTagger(TaggerI):
                 for (tid, tpl) in enumerate(Template.ALLTEMPLATES)
                 if tid not in usedtpls
             ]
-            print(f"UNUSED TEMPLATES ({len(unused)})")
+            safe_print(f"UNUSED TEMPLATES ({len(unused)})")
 
-            for (tid, tpl) in unused:
-                print(f"{tid:03d} {str(tpl):s}")
+            for tid, tpl in unused:
+                safe_print(f"{tid:03d} {str(tpl):s}")
 
         if test_stats is None:
             print_train_stats()
         else:
             print_testtrain_stats()
-        print()
+        safe_print()
         if printunused:
             print_unused_templates()
-        print()
+        safe_print()
 
     def batch_tag_incremental(self, sequences, gold):
         """

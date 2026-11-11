@@ -2,10 +2,10 @@
 #
 # Natural Language Toolkit: substitute a pattern with
 #                           a replacement in every file
-# Copyright (C) 2001-2021 NLTK Project
+# Copyright (C) 2001-2026 NLTK Project
 # Author: Edward Loper <edloper@gmail.com>
 #         Steven Bird <stevenbird1@gmail.com>
-# URL: <http://nltk.org/>
+# URL: <https://www.nltk.org/>
 # For license information, see LICENSE.TXT
 
 # NB Should work on all platforms,
@@ -17,7 +17,6 @@ import sys
 
 
 def update(file, pattern, replacement):
-
     try:
         # make sure we can write the file
         old_perm = os.stat(file)[0]
@@ -43,7 +42,6 @@ def update(file, pattern, replacement):
 
 
 if __name__ == "__main__":
-
     if len(sys.argv) != 3:
         exit("Usage: %s <pattern> <replacement>" % sys.argv[0])
 

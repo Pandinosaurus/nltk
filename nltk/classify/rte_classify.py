@@ -1,8 +1,8 @@
 # Natural Language Toolkit: RTE Classifier
 #
-# Copyright (C) 2001-2021 NLTK Project
+# Copyright (C) 2001-2026 NLTK Project
 # Author: Ewan Klein <ewan@inf.ed.ac.uk>
-# URL: <http://nltk.org/>
+# URL: <https://www.nltk.org/>
 # For license information, see LICENSE.TXT
 
 """
@@ -18,7 +18,8 @@ TO DO: add lemmatization
 """
 
 from nltk.classify.maxent import MaxentClassifier
-from nltk.classify.util import accuracy, check_megam_config
+from nltk.classify.util import accuracy
+from nltk.termsec import safe_print
 from nltk.tokenize import RegexpTokenizer
 
 
@@ -86,11 +87,11 @@ class RTEFeatureExtractor:
         ne_overlap = {token for token in self._overlap if self._ne(token)}
         if toktype == "ne":
             if debug:
-                print("ne overlap", ne_overlap)
+                safe_print("ne overlap", ne_overlap)
             return ne_overlap
         elif toktype == "word":
             if debug:
-                print("word overlap", self._overlap - ne_overlap)
+                safe_print("word overlap", self._overlap - ne_overlap)
             return self._overlap - ne_overlap
         else:
             raise ValueError("Type not recognized:'%s'" % toktype)
@@ -127,7 +128,9 @@ class RTEFeatureExtractor:
         """
         Use morphy from WordNet to find the base form of verbs.
         """
-        lemma = nltk.corpus.wordnet.morphy(word, pos=nltk.corpus.wordnet.VERB)
+        from nltk.corpus import wordnet as wn
+
+        lemma = wn.morphy(word, pos=wn.VERB)
         if lemma is not None:
             return lemma
         return word
@@ -164,20 +167,17 @@ def rte_classifier(algorithm, sample_N=None):
     featurized_test_set = rte_featurize(test_set)
 
     # Train the classifier
-    print("Training classifier...")
-    if algorithm in ["megam", "BFGS"]:  # MEGAM based algorithms.
-        # Ensure that MEGAM is configured first.
-        check_megam_config()
-        clf = lambda x: MaxentClassifier.train(featurized_train_set, algorithm)
+    safe_print("Training classifier...")
+    if algorithm in ["megam"]:  # MEGAM based algorithms.
+        clf = MaxentClassifier.train(featurized_train_set, algorithm)
     elif algorithm in ["GIS", "IIS"]:  # Use default GIS/IIS MaxEnt algorithm
         clf = MaxentClassifier.train(featurized_train_set, algorithm)
     else:
         err_msg = str(
-            "RTEClassifier only supports these algorithms:\n "
-            "'megam', 'BFGS', 'GIS', 'IIS'.\n"
+            "RTEClassifier only supports these algorithms:\n 'megam', 'GIS', 'IIS'.\n"
         )
         raise Exception(err_msg)
-    print("Testing classifier...")
+    safe_print("Testing classifier...")
     acc = accuracy(clf, featurized_test_set)
-    print("Accuracy: %6.4f" % acc)
+    safe_print("Accuracy: %6.4f" % acc)
     return clf

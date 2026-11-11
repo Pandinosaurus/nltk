@@ -2,15 +2,13 @@
 #
 # Setup script for the Natural Language Toolkit
 #
-# Copyright (C) 2001-2021 NLTK Project
-# Author: Steven Bird <stevenbird1@gmail.com>
-#         Edward Loper <edloper@gmail.com>
-#         Ewan Klein <ewan@inf.ed.ac.uk>
-# URL: <http://nltk.org/>
+# Copyright (C) 2001-2026 NLTK Project
+# Author: NLTK Team <nltk.team@gmail.com>
+# URL: <https://www.nltk.org/>
 # For license information, see LICENSE.TXT
 
 # Work around mbcs bug in distutils.
-# http://bugs.python.org/issue10945
+# https://bugs.python.org/issue10945
 import codecs
 
 try:
@@ -27,13 +25,27 @@ version_file = os.path.join(os.path.dirname(__file__), "nltk", "VERSION")
 with open(version_file) as fh:
     nltk_version = fh.read().strip()
 
+# Use README.md as the long description shown on PyPI. Fall back to a short
+# blurb if it is unavailable, so a build can never fail on a missing README.
+_short_description = (
+    "The Natural Language Toolkit (NLTK) is a Python package for "
+    "natural language processing."
+)
+readme_file = os.path.join(os.path.dirname(__file__), "README.md")
+try:
+    with open(readme_file, encoding="utf-8") as fh:
+        long_description = fh.read()
+    long_description_content_type = "text/markdown"
+except OSError:
+    long_description = _short_description
+    long_description_content_type = "text/plain"
+
 # setuptools
 from setuptools import find_packages, setup
 
 # Specify groups of optional dependencies
 extras_require = {
     "machine_learning": [
-        "gensim<4.0.0",
         "numpy",
         "python-crfsuite",
         "scikit-learn",
@@ -56,7 +68,7 @@ console_scripts = """
 nltk=nltk.cli:cli
 """
 
-_project_homepage = "http://nltk.org/"
+_project_homepage = "https://www.nltk.org/"
 
 setup(
     name="nltk",
@@ -68,9 +80,8 @@ setup(
         "Source Code": "https://github.com/nltk/nltk",
         "Issue Tracker": "https://github.com/nltk/nltk/issues",
     },
-    long_description="""\
-The Natural Language Toolkit (NLTK) is a Python package for
-natural language processing.  NLTK requires Python 3.6, 3.7, 3.8, or 3.9.""",
+    long_description=long_description,
+    long_description_content_type=long_description_content_type,
     license="Apache License, Version 2.0",
     keywords=[
         "NLP",
@@ -86,10 +97,10 @@ natural language processing.  NLTK requires Python 3.6, 3.7, 3.8, or 3.9.""",
         "natural language",
         "text analytics",
     ],
-    maintainer="Steven Bird",
-    maintainer_email="stevenbird1@gmail.com",
-    author="Steven Bird",
-    author_email="stevenbird1@gmail.com",
+    maintainer="NLTK Team",
+    maintainer_email="nltk.team@gmail.com",
+    author="NLTK Team",
+    author_email="nltk.team@gmail.com",
     classifiers=[
         "Development Status :: 5 - Production/Stable",
         "Intended Audience :: Developers",
@@ -98,10 +109,11 @@ natural language processing.  NLTK requires Python 3.6, 3.7, 3.8, or 3.9.""",
         "Intended Audience :: Science/Research",
         "License :: OSI Approved :: Apache Software License",
         "Operating System :: OS Independent",
-        "Programming Language :: Python :: 3.6",
-        "Programming Language :: Python :: 3.7",
-        "Programming Language :: Python :: 3.8",
-        "Programming Language :: Python :: 3.9",
+        "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: 3.12",
+        "Programming Language :: Python :: 3.13",
+        "Programming Language :: Python :: 3.14",
+        "Programming Language :: Python :: 3.15",
         "Topic :: Scientific/Engineering",
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
         "Topic :: Scientific/Engineering :: Human Machine Interfaces",
@@ -113,15 +125,19 @@ natural language processing.  NLTK requires Python 3.6, 3.7, 3.8, or 3.9.""",
         "Topic :: Text Processing :: Linguistic",
     ],
     package_data={"nltk": ["test/*.doctest", "VERSION"]},
-    python_requires=">=3.6",
+    python_requires=">=3.11",
     install_requires=[
+        "defusedxml",
         "click",
         "joblib",
-        "regex",
+        "regex>=2021.8.3",
         "tqdm",
     ],
     extras_require=extras_require,
-    packages=find_packages(),
+    # The unit tests (nltk.test.unit, 270+ files, the attack harnesses and the
+    # advisory probes among them) are for the repository and CI; the wheel
+    # ships the library and the doctests only. The sdist still carries them.
+    packages=find_packages(exclude=["nltk.test.unit", "nltk.test.unit.*"]),
     zip_safe=False,  # since normal files will be present too?
     entry_points=console_scripts,
 )

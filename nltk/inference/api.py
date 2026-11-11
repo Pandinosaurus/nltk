@@ -3,7 +3,7 @@
 # Author: Ewan Klein <ewan@inf.ed.ac.uk>
 #         Dan Garrette <dhgarrette@gmail.com>
 #
-# URL: <http://nltk.org/>
+# URL: <https://www.nltk.org/>
 # For license information, see LICENSE.TXT
 
 """
@@ -21,6 +21,8 @@ the assumptions plus the negation of *G*.
 import threading
 import time
 from abc import ABCMeta, abstractmethod
+
+from nltk.termsec import safe_print
 
 
 class Prover(metaclass=ABCMeta):
@@ -90,7 +92,7 @@ class TheoremToolCommand(metaclass=ABCMeta):
         Retract assumptions from the assumption list.
 
         :param debug: If True, give warning when ``retracted`` is not present on
-        assumptions list.
+            assumptions list.
         :type debug: bool
         :param retracted: assumptions to be retracted
         :type retracted: list(sem.Expression)
@@ -218,7 +220,7 @@ class BaseTheoremToolCommand(TheoremToolCommand):
         Retract assumptions from the assumption list.
 
         :param debug: If True, give warning when ``retracted`` is not present on
-        assumptions list.
+            assumptions list.
         :type debug: bool
         :param retracted: assumptions to be retracted
         :type retracted: list(sem.Expression)
@@ -226,7 +228,7 @@ class BaseTheoremToolCommand(TheoremToolCommand):
         retracted = set(retracted)
         result_list = list(filter(lambda a: a not in retracted, self._assumptions))
         if debug and result_list == self._assumptions:
-            print(Warning("Assumptions list has not been changed:"))
+            safe_print(Warning("Assumptions list has not been changed:"))
             self.print_assumptions()
 
         self._assumptions = result_list
@@ -254,7 +256,7 @@ class BaseTheoremToolCommand(TheoremToolCommand):
         Print the list of the current assumptions.
         """
         for a in self.assumptions():
-            print(a)
+            safe_print(a)
 
 
 class BaseProverCommand(BaseTheoremToolCommand, ProverCommand):
@@ -350,7 +352,7 @@ class BaseModelBuilderCommand(BaseTheoremToolCommand, ModelBuilderCommand):
         :return: str
         """
         if self._result is None:
-            raise LookupError("You have to call build_model() first to " "get a model!")
+            raise LookupError("You have to call build_model() first to get a model!")
         else:
             return self._decorate_model(self._model, format)
 
@@ -484,7 +486,7 @@ class ModelBuilderCommandDecorator(TheoremToolCommandDecorator, ModelBuilderComm
         :return: str
         """
         if self._result is None:
-            raise LookupError("You have to call build_model() first to " "get a model!")
+            raise LookupError("You have to call build_model() first to get a model!")
         else:
             return self._decorate_model(self._model, format)
 
@@ -601,13 +603,13 @@ class TheoremToolThread(threading.Thread):
         try:
             self._result = self._command()
             if self._verbose:
-                print(
+                safe_print(
                     "Thread %s finished with result %s at %s"
                     % (self._name, self._result, time.localtime(time.time()))
                 )
         except Exception as e:
-            print(e)
-            print("Thread %s completed abnormally" % (self._name))
+            safe_print(e)
+            safe_print("Thread %s completed abnormally" % (self._name))
 
     @property
     def result(self):

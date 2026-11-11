@@ -1,5 +1,5 @@
 # Chomsky random text generator, version 1.1, Raymond Hettinger, 2005/09/13
-# http://aspn.activestate.com/ASPN/Cookbook/Python/Recipe/440546
+# https://aspn.activestate.com/ASPN/Cookbook/Python/Recipe/440546
 
 """
 CHOMSKY is an aid to writing linguistic papers in the style
@@ -119,6 +119,8 @@ import random
 import textwrap
 from itertools import chain, islice
 
+from nltk.termsec import safe_print
+
 
 def generate_chomsky(times=5, line_length=72):
     parts = []
@@ -127,7 +129,7 @@ def generate_chomsky(times=5, line_length=72):
         random.shuffle(phraselist)
         parts.append(phraselist)
     output = chain.from_iterable(islice(zip(*parts), 0, times))
-    print(textwrap.fill(" ".join(output), line_length))
+    safe_print(textwrap.fill(" ".join(output), line_length))
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-.. Copyright (C) 2001-2021 NLTK Project
+.. Copyright (C) 2001-2026 NLTK Project
 .. For license information, see LICENSE.TXT
 
 ===========
@@ -139,7 +139,7 @@ And now we can test the estimators
 
     >>> def train_and_test(est):
     ...     hmm = trainer.train_supervised(train_corpus, estimator=est)
-    ...     print('%.2f%%' % (100 * hmm.evaluate(test_corpus)))
+    ...     print('%.2f%%' % (100 * hmm.accuracy(test_corpus)))
 
 Maximum Likelihood Estimation
 -----------------------------
@@ -194,6 +194,7 @@ our testing accordingly.
     ...         for sent in corpus[:100]]
 
 We will then need to redefine the rest of the training/testing variables
+
     >>> tag_set = unique_list(tag for sent in corpus for (word,tag) in sent)
     >>> len(tag_set)
     906
@@ -273,7 +274,7 @@ they don't get smoothed
     >>> p.prob('a')
     0.017649766667026317...
     >>> p.prob('o')
-    0.08433050215340411...
+    0.0843305021534041...
     >>> p.prob('z')
     0.022727272727272728...
     >>> p.prob('foobar')

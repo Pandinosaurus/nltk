@@ -1,9 +1,9 @@
 # Natural Language Toolkit: Senseval 2 Corpus Reader
 #
-# Copyright (C) 2001-2021 NLTK Project
+# Copyright (C) 2001-2026 NLTK Project
 # Author: Trevor Cohn <tacohn@cs.mu.oz.au>
 #         Steven Bird <stevenbird1@gmail.com> (modifications)
-# URL: <http://nltk.org/>
+# URL: <https://www.nltk.org/>
 # For license information, see LICENSE.TXT
 
 """
@@ -11,10 +11,10 @@ Read from the Senseval 2 Corpus.
 
 SENSEVAL [http://www.senseval.org/]
 Evaluation exercises for Word Sense Disambiguation.
-Organized by ACL-SIGLEX [http://www.siglex.org/]
+Organized by ACL-SIGLEX [https://www.siglex.org/]
 
 Prepared by Ted Pedersen <tpederse@umn.edu>, University of Minnesota,
-http://www.d.umn.edu/~tpederse/data.html
+https://www.d.umn.edu/~tpederse/data.html
 Distributed with permission.
 
 The NLTK version of the Senseval 2 files uses well-formed XML.
@@ -22,12 +22,20 @@ Each instance of the ambiguous words "hard", "interest", "line", and "serve"
 is tagged with a sense identifier, and supplied with context.
 """
 
-import re
-from xml.etree import ElementTree
-
+from nltk import redos
 from nltk.corpus.reader.api import *
 from nltk.corpus.reader.util import *
+from nltk.termsec import safe_print
 from nltk.tokenize import *
+from nltk.xmlsec import fromstring as safe_fromstring
+
+# ``(\s+)&(\s+)`` retried by sub over a whitespace run is O(n**2) on a crafted
+# instance block: a run of N spaces followed by ``&`` (with no trailing space)
+# fails the second ``\s+`` and re-scans the leading run at every offset. The
+# ``(?<!\s)`` anchors each attempt to the start of a whitespace run, so a failed
+# offset is rejected in O(1) instead of re-consuming the run: the match is now
+# linear (CWE-1333). ``redos.compile`` still bounds match time as a backstop.
+_LONE_AMP_RE = redos.compile(r"(?<!\s)(\s+)&(\s+)")
 
 
 class SensevalInstance:
@@ -38,11 +46,9 @@ class SensevalInstance:
         self.context = context
 
     def __repr__(self):
-        return "SensevalInstance(word=%r, position=%r, " "context=%r, senses=%r)" % (
-            self.word,
-            self.position,
-            self.context,
-            self.senses,
+        return (
+            f"SensevalInstance(word={self.word!r}, position={self.position!r}, "
+            f"context={self.context!r}, senses={self.senses!r})"
         )
 
 
@@ -89,7 +95,7 @@ class SensevalCorpusView(StreamBackedCorpusView):
             # Start of a lexical element?
             if line.lstrip().startswith("<lexelt"):
                 lexelt_num += 1
-                m = re.search("item=(\"[^\"]+\"|'[^']+')", line)
+                m = redos.search("item=(\"[^\"]+\"|'[^']+')", line)
                 assert m is not None  # <lexelt> has no 'item=...'
                 lexelt = m.group(1)[1:-1]
                 if lexelt_num < len(self._lexelts):
@@ -111,7 +117,7 @@ class SensevalCorpusView(StreamBackedCorpusView):
             if line.lstrip().startswith("</instance"):
                 xml_block = "\n".join(instance_lines)
                 xml_block = _fixXML(xml_block)
-                inst = ElementTree.fromstring(xml_block)
+                inst = safe_fromstring(xml_block)
                 return [self._parse_instance(inst, lexelt)]
 
     def _parse_instance(self, instance, lexelt):
@@ -149,7 +155,7 @@ class SensevalCorpusView(StreamBackedCorpusView):
                         pass  # Sentence boundary marker.
 
                     else:
-                        print("ACK", cword.tag)
+                        safe_print("ACK", cword.tag)
                         assert False, "expected CDATA or <wf> or <head>"
                     if cword.tail:
                         context += self._word_tokenizer.tokenize(cword.tail)
@@ -163,34 +169,51 @@ def _fixXML(text):
     Fix the various issues with Senseval pseudo-XML.
     """
     # <~> or <^> => ~ or ^
-    text = re.sub(r"<([~\^])>", r"\1", text)
+    text = redos.sub(r"<([~\^])>", r"\1", text)
     # fix lone &
-    text = re.sub(r"(\s+)\&(\s+)", r"\1&amp;\2", text)
+    text = _LONE_AMP_RE.sub(r"\1&amp;\2", text)
     # fix """
-    text = re.sub(r'"""', "'\"'", text)
+    text = redos.sub(r'"""', "'\"'", text)
     # fix <s snum=dd> => <s snum="dd"/>
-    text = re.sub(r'(<[^<]*snum=)([^">]+)>', r'\1"\2"/>', text)
+    # Bound the tag bodies below and keep `<` out of every run: a repeated `<...`
+    # anchor whose run has no terminator then stops at the next anchor, so a
+    # crafted block is O(n) rather than O(n*bound) or O(n**2) (CWE-407).
+    text = redos.sub(r'(<[^<]{0,256}snum=)([^"<>]{1,256})>', r'\1"\2"/>', text)
     # fix foreign word tag
-    text = re.sub(r"<\&frasl>\s*<p[^>]*>", "FRASL", text)
+    text = redos.sub(r"<\&frasl>\s*<p[^>]*>", "FRASL", text)
     # remove <&I .>
-    text = re.sub(r"<\&I[^>]*>", "", text)
+    text = redos.sub(r"<\&I[^<>]{0,256}>", "", text)
     # fix <{word}>
-    text = re.sub(r"<{([^}]+)}>", r"\1", text)
+    text = redos.sub(r"<{([^<}]{1,256})}>", r"\1", text)
     # remove <@>, <p>, </p>
-    text = re.sub(r"<(@|/?p)>", r"", text)
+    text = redos.sub(r"<(@|/?p)>", r"", text)
     # remove <&M .> and <&T .> and <&Ms .>
-    text = re.sub(r"<&\w+ \.>", r"", text)
+    text = redos.sub(r"<&\w+ \.>", r"", text)
     # remove <!DOCTYPE... > lines
-    text = re.sub(r"<!DOCTYPE[^>]*>", r"", text)
+    text = redos.sub(r"<!DOCTYPE[^<>]{0,1024}>", r"", text)
     # remove <[hi]> and <[/p]> etc
-    text = re.sub(r"<\[\/?[^>]+\]*>", r"", text)
+    text = redos.sub(r"<\[\/?[^<>]{1,256}\]*>", r"", text)
     # take the thing out of the brackets: <&hellip;>
-    text = re.sub(r"<(\&\w+;)>", r"\1", text)
+    text = redos.sub(r"<(\&\w+;)>", r"\1", text)
     # and remove the & for those patterns that aren't regular XML
-    text = re.sub(r"&(?!amp|gt|lt|apos|quot)", r"", text)
+    text = redos.sub(r"&(?!amp|gt|lt|apos|quot)", r"", text)
     # fix 'abc <p="foo"/>' style tags - now <wf pos="foo">abc</wf>
-    text = re.sub(
-        r'[ \t]*([^<>\s]+?)[ \t]*<p="([^"]*"?)"/>', r' <wf pos="\2">\1</wf>', text
+    #
+    # Possessive quantifiers (regex module) prevent catastrophic backtracking
+    # *within* a single match attempt (ReDoS, CWE-1333). They are not enough on
+    # their own: when the trailing <p="..."/> tag is absent, ``sub`` retries the
+    # match at every start offset, and a leading run of spaces/tabs is re-scanned
+    # from each offset -> O(n**2) (a run of N leading spaces before a lone tag
+    # burns the redos time budget). The ``(?<![ \t])`` anchors each attempt to the
+    # start of a whitespace run, so a mid-run offset is rejected in O(1) instead of
+    # re-consuming the run; combined with the possessive token/whitespace classes
+    # (which cannot cross the separators or the literal '"'), the scan is linear
+    # and match-for-match identical to the original. ``redos.sub`` still bounds
+    # match time as a backstop for any residual pathology.
+    text = redos.sub(
+        r'(?<![ \t])[ \t]*+([^<>\s]++)[ \t]*+<p="([^"]*+"?)"/>',
+        r' <wf pos="\2">\1</wf>',
+        text,
     )
-    text = re.sub(r'\s*"\s*<p=\'"\'/>', " <wf pos='\"'>\"</wf>", text)
+    text = redos.sub(r"(?<!\s)\s*+\"\s*+<p='\"'/>", " <wf pos='\"'>\"</wf>", text)
     return text

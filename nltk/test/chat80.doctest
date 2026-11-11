@@ -1,4 +1,4 @@
-.. Copyright (C) 2001-2021 NLTK Project
+.. Copyright (C) 2001-2026 NLTK Project
 .. For license information, see LICENSE.TXT
 
 =======
@@ -8,7 +8,7 @@ Chat-80
 Chat-80 was a natural language system which allowed the user to
 interrogate a Prolog knowledge base in the domain of world
 geography. It was developed in the early '80s by Warren and Pereira; see
-`<http://acl.ldc.upenn.edu/J/J82/J82-3002.pdf>`_ for a description and
+`<https://aclanthology.org/J82-3002.pdf>`_ for a description and
 `<http://www.cis.upenn.edu/~pereira/oldies.html>`_ for the source
 files.
 
@@ -29,8 +29,7 @@ The Chat-80 World Database consists of the following files::
 
 This module uses a slightly modified version of ``world0.pl``, in which
 a set of Prolog rules have been omitted. The modified file is named
-``world1.pl``. Currently, the file ``rivers.pl`` is not read in, since
-it uses a list rather than a string in the second field.
+``world1.pl``. ``river_courses`` reads each river's course from ``rivers.pl``.
 
 Reading Chat-80 Files
 =====================
@@ -108,14 +107,22 @@ the extraction.
     >>> concepts = chat80.clause2concepts('cities.pl', 'city', schema)
     >>> concepts
     [Concept('city'), Concept('country_of'), Concept('population_of')]
+    >>> from pprint import pprint
     >>> for c in concepts:
-    ...     print("%s:\n\t%s" % (c.prefLabel, c.extension[:4]))
+    ...     print(f"{c.prefLabel}:")
+    ...     pprint(c.extension[:4], indent=4, width=80)
     city:
-        ['athens', 'bangkok', 'barcelona', 'berlin']
+    ['athens', 'bangkok', 'barcelona', 'berlin']
     country_of:
-        [('athens', 'greece'), ('bangkok', 'thailand'), ('barcelona', 'spain'), ('berlin', 'east_germany')]
+    [   ('athens', 'greece'),
+        ('bangkok', 'thailand'),
+        ('barcelona', 'spain'),
+        ('berlin', 'east_germany')]
     population_of:
-        [('athens', '1368'), ('bangkok', '1178'), ('barcelona', '1280'), ('berlin', '3481')]
+    [   ('athens', '1368'),
+        ('bangkok', '1178'),
+        ('barcelona', '1280'),
+        ('berlin', '3481')]
 
 In addition, the ``extension`` can be further
 processed: in the case of the ``'border'`` relation, we check that the
@@ -156,7 +163,7 @@ a pair ``('zloty', 'zloty')``. In order to parse English sentences that
 refer to these entities, we also create a lexical item such as the
 following for each individual constant::
 
-   PropN[num=sg, sem=<\P.(P zloty)>] -> 'Zloty'
+   PropN[NUM=sg, SEM=<\P.P(zloty)>] -> 'Zloty'
 
 The set of rules is written to the file ``chat_pnames.fcfg`` in the
 current directory.

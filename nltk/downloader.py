@@ -1,8 +1,8 @@
 # Natural Language Toolkit: Corpus & Model Downloader
 #
-# Copyright (C) 2001-2021 NLTK Project
+# Copyright (C) 2001-2026 NLTK Project
 # Author: Edward Loper <edloper@gmail.com>
-# URL: <http://nltk.org/>
+# URL: <https://www.nltk.org/>
 # For license information, see LICENSE.TXT
 
 """
@@ -66,6 +66,7 @@ or::
 
     python -m nltk.downloader [-d DATADIR] [-q] [-f] [-k] PACKAGE_IDS
 """
+
 # ----------------------------------------------------------------------
 
 """
@@ -159,35 +160,241 @@ default: unzip or not?
 
 """
 import functools
+import http.client
+import io
 import itertools
+import ntpath
 import os
+import posixpath
 import shutil
+import stat
 import subprocess
 import sys
 import textwrap
 import threading
 import time
+import warnings
 import zipfile
-from hashlib import md5
+from hashlib import md5, sha256
+from urllib.error import HTTPError, URLError
 from xml.etree import ElementTree
 
-try:
-    TKINTER = True
-    from tkinter import Button, Canvas, Entry, Frame, IntVar, Label, Menu, TclError, Tk
-    from tkinter.messagebox import showerror
-
-    from nltk.draw.table import Table
-    from nltk.draw.util import ShowText
-except ImportError:
-    TKINTER = False
-    TclError = ValueError
-
-from urllib.error import HTTPError, URLError
-from urllib.request import urlopen
-
 import nltk
+from nltk import pathsec
+from nltk.data import _check_decompression_bomb
+from nltk.pathsec import ZipFile, _reject_colliding_members
+from nltk.pathsec import open as pathsec_open
+from nltk.pathsec import urlopen, validate_path
+from nltk.termsec import safe_print, sanitize_terminal
+from nltk.util import acyclic_breadth_first
+from nltk.xmlsec import parse as safe_parse
+from nltk.xmlsec import screen
+
+# Ceilings on what the data server may hand us (CWE-400): the declared package
+# size comes from the same server, so it is capped too (the largest real package
+# is under 100 MB), and the index (under 100 KB in reality) is read bounded.
+MAX_PACKAGE_BYTES = 1024 * 1024 * 1024
+MAX_INDEX_BYTES = 64 * 1024 * 1024
+# A package id or subdir component from the index becomes a file name with
+# ".zip.lock" or ".zip.tmp" appended; filesystems allow 255 bytes a component.
+MAX_NAME_BYTES = 200
+
+# A parsed tree costs about twenty times its bytes, and DTD default attributes
+# multiply that further, so the index structure is bounded too. The real index
+# has about 550 elements and 1,300 attributes, and no token near a megabyte.
+MAX_INDEX_ELEMENTS = 50_000
+MAX_INDEX_ATTRIBUTES = 100_000
+MAX_INDEX_TOKEN_BYTES = 1024 * 1024
+
+# Seconds a data server may stall a single socket read, and the most the whole
+# index read may take: a drip-fed index never trips the first on its own.
+NETWORK_TIMEOUT = 120
+INDEX_DEADLINE = 300
+
+# A package body gets a total time budget too: its declared size at a slow
+# link rate, floored and capped (the largest real package, 99 MB, needs 6,055
+# seconds at this rate). A server dripping a byte every few seconds never
+# trips the per-read timeout, and a full read block never arrives to be timed.
+PACKAGE_MIN_BYTES_PER_SECOND = 16 * 1024
+PACKAGE_DEADLINE_FLOOR = 300
+PACKAGE_DEADLINE_CEILING = 2 * 60 * 60
+
+# What an archive may expand to on disk is the index's unzipped_size plus a
+# little slack, and that declared size is capped too since it comes from the
+# same server (the largest real package, framenet_v17, unzips to 855 MB).
+MAX_UNZIPPED_BYTES = 8 * 1024 * 1024 * 1024
+UNZIPPED_SIZE_SLACK = 1024 * 1024
+
+# Retired pickle packages and their replacements (CVE-2024-39705): asking for
+# the old one, directly or through a collection such as "popular", installs the
+# new one too (#3394). One way only: a successor never brings the pickles.
+_SUCCESSORS = {
+    "punkt": "punkt_tab",
+    "averaged_perceptron_tagger": "averaged_perceptron_tagger_eng",
+    "averaged_perceptron_tagger_ru": "averaged_perceptron_tagger_rus",
+    "maxent_ne_chunker": "maxent_ne_chunker_tab",
+    "maxent_treebank_pos_tagger": "maxent_treebank_pos_tagger_tab",
+}
+
+
+def _package_deadline(declared):
+    """Seconds a package body of *declared* bytes may take to arrive."""
+    budget = declared / PACKAGE_MIN_BYTES_PER_SECOND
+    return max(PACKAGE_DEADLINE_FLOOR, min(PACKAGE_DEADLINE_CEILING, budget))
+
+
+def _bounded_body(stream, limit, what, deadline=None):
+    """Read *stream* in full, refusing (ValueError) once it exceeds *limit*
+    bytes, or once the monotonic clock passes *deadline* when one is given,
+    and return the bytes read as a file object for a parser."""
+    # read1 hands back whatever one socket read produced, so the deadline is
+    # checked while a server drip feeds bytes instead of after a full block;
+    # only a real buffered stream (an HTTP response is one) offers it.
+    read = stream.read1 if isinstance(stream, io.BufferedIOBase) else stream.read
+    chunks, total = [], 0
+    try:
+        while True:
+            block = read(1024 * 64)
+            if not block:
+                break
+            total += len(block)
+            if total > limit:
+                raise ValueError(
+                    f"The {what} is larger than {limit} bytes; refusing to read "
+                    "an unbounded response (CWE-400)"
+                )
+            chunks.append(block)
+            if deadline is not None and time.monotonic() > deadline:
+                raise ValueError(
+                    f"The {what} took longer than its time budget to arrive; "
+                    "refusing a drip-fed response (CWE-400)"
+                )
+    finally:
+        close = getattr(stream, "close", None)
+        if close is not None:
+            close()
+    return io.BytesIO(b"".join(chunks))
+
+
+def _check_index_structure(data):
+    """Refuse an index whose parsed tree would dwarf its size (CWE-400).
+
+    :func:`nltk.xmlsec.screen` streams *data* through expat without building a
+    tree and counts elements and attributes, DTD defaults included, under the
+    index's own ceilings, lower than the module's, so no element count,
+    attribute count or single token beyond them is ever materialised. An
+    entity declaration is refused there as well.
+    """
+    screen(
+        data,
+        max_elements=MAX_INDEX_ELEMENTS,
+        max_attributes=MAX_INDEX_ATTRIBUTES,
+        max_token_bytes=MAX_INDEX_TOKEN_BYTES,
+    )
+
+
+def _refuse_unprintable(value, what):
+    """Refuse an index identifier holding anything a terminal would act on:
+    a control or line-break character, an unbalanced or overriding bidi
+    control, or an invisible format character (CWE-150 / CWE-1007)."""
+    text = str(value)
+    if sanitize_terminal(text, single_line=True) != text:
+        raise ValueError(
+            f"Invalid {what} {sanitize_terminal(repr(text))}: it holds control, "
+            "line-break, bidi or invisible characters (CWE-150)"
+        )
+
+
+def _one_line_each(text):
+    """Sanitise every line of *text* on its own, so no line break survives
+    inside one and bidi nesting is balanced per displayed line (CWE-150)."""
+    return "\n".join(
+        sanitize_terminal(line, single_line=True) for line in str(text).split("\n")
+    )
+
+
+def _refuse_install_aliases(packages):
+    """Refuse an index in which one package would install into another's
+    place: two archives, or an archive and the directory another unzips to,
+    that are one name on a case-folding or normalising filesystem (macOS,
+    Windows), or a package placed inside the directory another unzips to.
+    Either would overwrite or delete the other's files (resource poisoning);
+    the real index has none."""
+    claimed = []
+    for package in packages:
+        claimed.append(package.filename)
+        if package.filename.endswith(".zip"):
+            # The directory it unzips to is claimed whole, as a file is, so a
+            # path inside it collides as well as a path spelled like it.
+            claimed.append(package.filename[:-4])
+    _reject_colliding_members(claimed, context="data index install path")
+
+
+def _archived_files_in_place(archive):
+    """True when every file of the checksum-verified *archive* is beside it,
+    unpacked, as a regular file of its archived size, each found the way a
+    reader opens it (so a case-folding filesystem resolves it as it would)."""
+    root = os.path.dirname(archive)
+    try:
+        with ZipFile(archive) as zf:
+            members = [m for m in zf.infolist() if not m.is_dir()]
+    except (OSError, ValueError, zipfile.BadZipFile):
+        return False
+    for member in members:
+        parts = member.filename.replace("\\", "/").split("/")
+        if os.pardir in parts:
+            return False
+        try:
+            st = os.lstat(os.path.join(root, *parts))
+        except OSError:
+            return False
+        if not stat.S_ISREG(st.st_mode) or st.st_size != member.file_size:
+            return False
+    return True
+
 
 # urllib2 = nltk.internals.import_from_stdlib('urllib2')
+
+
+def _authorize_data_dir(directory):
+    """Register a caller-chosen NLTK data / download directory on
+    ``nltk.data.path`` so that the downloader's own reads and writes under it
+    pass the ``nltk.pathsec`` sandbox.
+
+    A ``download_dir`` is an explicit, trusted destination for NLTK's own data,
+    so the specific directory is authorized -- as opposed to blanket-allowing a
+    shared location such as the system temp dir, which would widen the sandbox
+    for every caller (GHSA-p4rw follow-up, CWE-73/CWE-378).
+    """
+    if not directory:
+        return
+    try:
+        resolved = os.path.realpath(str(directory))
+    except (OSError, ValueError):
+        return
+
+    # Refuse to trust a shared, world/group-writable location (e.g. a bare /tmp
+    # download_dir): another local user could plant files there that NLTK would
+    # then read as trusted data (CWE-377/CWE-378). The dir may not exist yet, so
+    # check the nearest existing ancestor.
+    from nltk import pathsec
+
+    probe = resolved
+    while not os.path.exists(probe) and os.path.dirname(probe) != probe:
+        probe = os.path.dirname(probe)
+    if not pathsec.is_private_dir(probe):
+        warnings.warn(
+            f"NLTK will not authorize the non-private download directory "
+            f"{resolved!r}: it (or an ancestor) is world- or group-writable, so "
+            f"another local user could plant files there. Choose a private "
+            f"location such as ~/nltk_data.",
+            stacklevel=3,
+        )
+        return
+
+    existing = {os.path.realpath(str(p)) for p in nltk.data.path if isinstance(p, str)}
+    if resolved not in existing:
+        nltk.data.path.append(resolved)
 
 
 ######################################################################
@@ -227,9 +434,49 @@ class Package:
         self.name = name or id
         """A string name for this package."""
 
+        # Validate subdir to prevent path traversal from malicious XML index.
+        # Check absoluteness under both posix and windows rules, plus a drive
+        # prefix: Python 3.13's ntpath.isabs no longer treats a bare "/tmp" as
+        # absolute, so os.path.isabs alone lets a rooted subdir through on Windows.
+        _norm_subdir = subdir.replace("\\", "/")
+        if (
+            os.path.isabs(subdir)
+            or posixpath.isabs(_norm_subdir)
+            or ntpath.isabs(subdir)
+            or ntpath.splitdrive(subdir)[0]
+            or ".." in _norm_subdir.split("/")
+        ):
+            raise ValueError(
+                f"Invalid package subdir {subdir!r}: must be a relative path "
+                f"without parent directory references"
+            )
         self.subdir = subdir
         """The subdirectory where this package should be installed.
            E.g., ``'corpora'`` or ``'taggers'``."""
+
+        # Validate id to prevent path traversal
+        if os.sep in id or "/" in id or "\\" in id or ".." in id:
+            raise ValueError(
+                f"Invalid package id {id!r}: must not contain path separators"
+            )
+        # The id and the subdir become file names: bound them well under the
+        # 255 bytes a filesystem allows a component, so an index cannot make
+        # the installer fail on a name it could not have been asked for.
+        for what, value in (("id", id), ("subdir", subdir)):
+            if any(
+                len(part.encode("utf-8")) > MAX_NAME_BYTES for part in value.split("/")
+            ):
+                raise ValueError(
+                    f"Invalid package {what} {sanitize_terminal(repr(value))}: "
+                    f"a path component longer than {MAX_NAME_BYTES} bytes"
+                )
+            # A name a filesystem would store under another name (a trailing
+            # dot or space, a device name, a decomposed spelling) is refused.
+            why = _name_not_as_written(value.replace("\\", "/"))
+            if why is not None:
+                raise ValueError(
+                    f"Invalid package {what} {sanitize_terminal(repr(value))}: {why}"
+                )
 
         self.url = url
         """A URL that can be used to download this package's file."""
@@ -261,10 +508,6 @@ class Package:
         """Author of this package."""
 
         ext = os.path.splitext(url.split("/")[-1])[1]
-        self.filename = os.path.join(subdir, id + ext)
-        """The filename that should be used for this package's file.  It
-           is formed by joining ``self.subdir`` with ``self.id``, and
-           using the same extension as ``url``."""
 
         self.unzip = bool(int(unzip))  # '0' or '1'
         """A flag indicating whether this corpus should be unzipped by
@@ -272,14 +515,23 @@ class Package:
 
         # Include any other attributes provided by the XML file.
         self.__dict__.update(kw)
+        self.filename = os.path.join(subdir, id + ext)  # Neutralize kw attack
+        """The filename that should be used for this package's file.  It
+           is formed by joining ``self.subdir`` with ``self.id``, and
+           using the same extension as ``url``."""
 
     @staticmethod
     def fromxml(xml):
         if isinstance(xml, str):
-            xml = ElementTree.parse(xml)
+            xml = safe_parse(xml)
         for key in xml.attrib:
             xml.attrib[key] = str(xml.attrib[key])
-        return Package(**xml.attrib)
+        package = Package(**xml.attrib)
+        # An index id or file name becomes a file on disk and a listed line,
+        # so one a terminal would act on is refused at the source (CWE-150).
+        _refuse_unprintable(package.id, "package id")
+        _refuse_unprintable(package.filename, "package file name")
+        return package
 
     def __lt__(self, other):
         return self.id < other.id
@@ -316,11 +568,13 @@ class Collection:
     @staticmethod
     def fromxml(xml):
         if isinstance(xml, str):
-            xml = ElementTree.parse(xml)
+            xml = safe_parse(xml)
         for key in xml.attrib:
             xml.attrib[key] = str(xml.attrib[key])
         children = [child.get("ref") for child in xml.findall("item")]
-        return Collection(children=children, **xml.attrib)
+        collection = Collection(children=children, **xml.attrib)
+        _refuse_unprintable(collection.id, "collection id")
+        return collection
 
     def __lt__(self, other):
         return self.id < other.id
@@ -415,9 +669,12 @@ class ErrorMessage(DownloaderMessage):
     def __init__(self, package, message):
         self.package = package
         if isinstance(message, Exception):
-            self.message = str(message)
-        else:
-            self.message = message
+            message = str(message)
+        # The text can carry server-supplied names, member names or a raw HTTP
+        # reason phrase, and download() may re-raise it; neutralise it here.
+        if isinstance(message, str):
+            message = sanitize_terminal(message)
+        self.message = message
 
 
 class ProgressMessage(DownloaderMessage):
@@ -437,6 +694,80 @@ class SelectDownloadDirMessage(DownloaderMessage):
 ######################################################################
 # NLTK Data Server
 ######################################################################
+
+
+def _not_ours(st):
+    """True when an installed entry, by its stat, is owned by neither this
+    account nor root, or carries a group or world write bit: another account
+    could have rewritten it in place, same name and same size. POSIX only;
+    the predicate is pathsec's own."""
+    return os.name == "posix" and not pathsec._private_stat(st)
+
+
+def _shared_install(download_dir):
+    """True when a download is evidently for other accounts too: made as root,
+    or into a directory outside the installing account's home (a system or
+    image location). A downloaded archive is private to its installer (0600),
+    so such an install is extracted for the accounts that will read it. POSIX
+    only: elsewhere builtins.open leaves the archive readable per the profile.
+    """
+    if os.name != "posix":
+        return False
+    if os.geteuid() == 0:
+        return True
+    home = os.path.realpath(os.path.expanduser("~"))
+    target = os.path.realpath(download_dir)
+    return not (target == home or target.startswith(home + os.sep))
+
+
+def _canonical_dir(path):
+    """*path* with its existing prefix resolved (symlinks and, on Windows, 8.3
+    aliases such as RUNNER~1) and any missing tail kept as written. The names
+    the downloader derives under it (the install lock, the .tmp file) are
+    removed through pathsec, whose syntax guard refuses an 8.3 alias, so they
+    are derived from the canonical form; only the existing prefix is resolved
+    because realpath of a missing path is unstable on Windows."""
+    head = os.path.abspath(path)
+    tail = []
+    while not os.path.lexists(head):
+        parent, name = os.path.split(head)
+        if parent == head:
+            break
+        head, tail = parent, [name] + tail
+    return os.path.join(os.path.realpath(head), *tail)
+
+
+def _make_install_dirs(download_dir, subdir):
+    """Create *download_dir* and *subdir* under it, each missing level without
+    a group or world write bit whatever the umask, and return the first of
+    them that another account owns or can write to, or None. Judged the way
+    ``find()`` judges a data root, POSIX under enforcement: the downloader
+    installs only where the data it installs will be read from."""
+    from nltk import pathsec
+
+    target = os.path.abspath(os.path.join(download_dir, subdir))
+    missing = []
+    while not os.path.lexists(target):
+        missing.append(target)
+        parent = os.path.dirname(target)
+        if parent == target:
+            break
+        target = parent
+    for path in reversed(missing):
+        try:
+            os.mkdir(path, 0o755)
+        except FileExistsError:
+            pass
+    if os.name != "posix" or not pathsec.ENFORCE:
+        return None
+    chain = [os.path.abspath(download_dir)]
+    for part in subdir.replace("\\", "/").split("/"):
+        if part and part != os.curdir:
+            chain.append(os.path.join(chain[-1], part))
+    for path in chain:
+        if not pathsec.is_private_dir(path):
+            return path
+    return None
 
 
 class Downloader:
@@ -496,6 +827,10 @@ class Downloader:
         self._index = None
         """The XML index file downloaded from the data server"""
 
+        self._index_url = None
+        """The URL ``self._index`` was fetched from; None for an index
+           installed by hand. A different ``self._url`` fetches afresh."""
+
         self._index_timestamp = None
         """Time at which ``self._index`` was downloaded.  If it is more
            than ``INDEX_TIMEOUT`` seconds old, it will be re-downloaded."""
@@ -529,11 +864,11 @@ class Downloader:
         lines = 0  # for more_prompt
         if download_dir is None:
             download_dir = self._download_dir
-            print("Using default data directory (%s)" % download_dir)
+            safe_print("Using default data directory (%s)" % download_dir)
         if header:
-            print("=" * (26 + len(self._url)))
-            print(" Data server index for <%s>" % self._url)
-            print("=" * (26 + len(self._url)))
+            safe_print("=" * (26 + len(self._url)))
+            safe_print(" Data server index for <%s>" % self._url)
+            safe_print("=" * (26 + len(self._url)))
             lines += 3  # for more_prompt
         stale = partial = False
 
@@ -543,7 +878,7 @@ class Downloader:
         if show_collections:
             categories.append("collections")
         for category in categories:
-            print("%s:" % category.capitalize())
+            safe_print("%s:" % category.capitalize())
             lines += 1  # for more_prompt
             for info in sorted(getattr(self, category)(), key=str):
                 status = self.status(info, download_dir)
@@ -559,23 +894,30 @@ class Downloader:
                     self.PARTIAL: "P",
                     self.NOT_INSTALLED: " ",
                 }[status]
+                # The name is escaped as one line before it is wrapped, so an
+                # entity-form line break shows as an escape instead of moving
+                # the text after it; ids from the index are checked by fromxml.
                 name = textwrap.fill(
-                    "-" * 27 + (info.name or info.id), 75, subsequent_indent=27 * " "
+                    "-" * 27
+                    + sanitize_terminal(info.name or info.id, single_line=True),
+                    75,
+                    subsequent_indent=27 * " ",
                 )[27:]
-                print("  [{}] {} {}".format(prefix, info.id.ljust(20, "."), name))
+                name = _one_line_each(name)
+                safe_print("  [{}] {} {}".format(prefix, info.id.ljust(20, "."), name))
                 lines += len(name.split("\n"))  # for more_prompt
                 if more_prompt and lines > 20:
                     user_input = input("Hit Enter to continue: ")
                     if user_input.lower() in ("x", "q"):
                         return
                     lines = 0
-            print()
+            safe_print()
         msg = "([*] marks installed packages"
         if stale:
             msg += "; [-] marks out-of-date or corrupt packages"
         if partial:
             msg += "; [P] marks partially installed collections"
-        print(textwrap.fill(msg + ")", subsequent_indent=" ", width=76))
+        safe_print(textwrap.fill(msg + ")", subsequent_indent=" ", width=76))
 
     def packages(self):
         self._update_index()
@@ -612,15 +954,44 @@ class Downloader:
     # downloader in the gui can just kill the download thread anytime
     # it wants.
 
-    def incr_download(self, info_or_id, download_dir=None, force=False):
+    def incr_download(
+        self,
+        info_or_id,
+        download_dir=None,
+        force=False,
+        _expanding=None,
+        extract=None,
+    ):
         # If they didn't specify a download_dir, then use the default one.
         if download_dir is None:
             download_dir = self._download_dir
             yield SelectDownloadDirMessage(download_dir)
 
+        # The download directory is the caller's chosen (trusted) destination
+        # for NLTK data; authorize that specific directory so the reads/writes
+        # below pass the pathsec sandbox (CWE-73, GHSA-p4rw follow-up).
+        _authorize_data_dir(download_dir)
+
+        # The caller's own request (not an expansion): run it, then install the
+        # successor of each retired package it reached (#3394) through the same
+        # checks. Nothing is looked up first, so a failing index is fetched once.
+        if _expanding is None:
+            reached = []
+            for msg in self.incr_download(info_or_id, download_dir, force, (), extract):
+                if isinstance(msg, StartPackageMessage):
+                    reached.append(msg.package.id)
+                yield msg
+            for successor in self._successors(reached):
+                yield from self.incr_download(
+                    successor, download_dir, force, (), extract
+                )
+            return
+
         # If they gave us a list of ids, then download each one.
         if isinstance(info_or_id, (list, tuple)):
-            yield from self._download_list(info_or_id, download_dir, force)
+            yield from self._download_list(
+                info_or_id, download_dir, force, _expanding, extract
+            )
             return
 
         # Look up the requested collection or package.
@@ -632,13 +1003,35 @@ class Downloader:
 
         # Handle collections.
         if isinstance(info, Collection):
+            # A collection holding itself, directly or through another, would
+            # recurse without end; the outer expansion already covers it.
+            if info.id in _expanding:
+                return
             yield StartCollectionMessage(info)
-            yield from self.incr_download(info.children, download_dir, force)
+            yield from self.incr_download(
+                info.children, download_dir, force, (*_expanding, info.id), extract
+            )
             yield FinishCollectionMessage(info)
 
         # Handle Packages (delegate to a helper function).
         else:
-            yield from self._download_package(info, download_dir, force)
+            yield from self._download_package(info, download_dir, force, extract)
+
+    def _successors(self, reached):
+        """The index's package for the successor of each package id in
+        *reached*, unless *reached* holds that successor already. Only the
+        index already loaded is consulted and only a package entry counts: a
+        mirror without the successor, or an index naming a collection there,
+        adds nothing and fetches nothing."""
+        found, seen = [], set(reached)
+        for pid in reached:
+            new = _SUCCESSORS.get(pid) if isinstance(pid, str) else None
+            package = self._packages.get(new)
+            if new in seen or not isinstance(package, Package):
+                continue
+            seen.add(new)
+            found.append(package)
+        return found
 
     def _num_packages(self, item):
         if isinstance(item, Package):
@@ -646,8 +1039,10 @@ class Downloader:
         else:
             return len(item.packages)
 
-    def _download_list(self, items, download_dir, force):
-        # Look up the requested items.
+    def _download_list(self, items, download_dir, force, _expanding=(), extract=None):
+        # Look up the requested items in a copy: a tuple cannot be assigned
+        # to, and the caller's list is theirs, not a place to keep lookups.
+        items = list(items)
         for i in range(len(items)):
             try:
                 items[i] = self._info_or_id(items[i])
@@ -655,15 +1050,18 @@ class Downloader:
                 yield ErrorMessage(items[i], e)
                 return
 
-        # Download each item, re-scaling their progress.
-        num_packages = sum(self._num_packages(item) for item in items)
+        # Download each item, re-scaling their progress. A list of collections
+        # holding no package at all must not divide by zero.
+        num_packages = max(1, sum(self._num_packages(item) for item in items))
         progress = 0
         for i, item in enumerate(items):
             if isinstance(item, Package):
                 delta = 1.0 / num_packages
             else:
                 delta = len(item.packages) / num_packages
-            for msg in self.incr_download(item, download_dir, force):
+            for msg in self.incr_download(
+                item, download_dir, force, _expanding, extract
+            ):
                 if isinstance(msg, ProgressMessage):
                     yield ProgressMessage(progress + msg.progress * delta)
                 else:
@@ -671,73 +1069,438 @@ class Downloader:
 
             progress += 100 * delta
 
-    def _download_package(self, info, download_dir, force):
+    def _download_package(self, info, download_dir, force, extract=None):
+        download_dir = _canonical_dir(download_dir)
+        if extract is None:
+            extract = _shared_install(download_dir)
         yield StartPackageMessage(info)
         yield ProgressMessage(0)
 
-        # Do we already have the current version?
-        status = self.status(info, download_dir)
-        if not force and status == self.INSTALLED:
+        # The file name becomes a directory entry that other tools list; one
+        # holding control, line-break or bidi characters is never created.
+        try:
+            _refuse_unprintable(info.filename, "package file name")
+        except ValueError as e:
+            yield ErrorMessage(info, e)
+            return
+
+        filepath = os.path.join(download_dir, info.filename)
+        tmp_filepath = filepath + ".tmp"
+        lock_filepath = filepath + ".lock"
+
+        # Defense-in-depth: verify the write target stays within download_dir.
+        #
+        # Two layers are required:
+        #
+        #   (1) Lexical containment blocks "../" traversal coming from package
+        #       metadata.  It is intentionally lexical (normpath/abspath, not
+        #       realpath) because the target leaf may not exist yet and on
+        #       Windows realpath of a non-existent path can be unstable
+        #       (short-name vs long-name, e.g. RUNNER~1 vs runneradmin).
+        #
+        #   (2) Symlink containment (CWE-59, "link following").  A purely lexical
+        #       check is bypassed by a symlink that already exists *inside*
+        #       download_dir and points outside it: the target is lexically
+        #       contained, but open()/os.replace() follow the link and write
+        #       outside.  We therefore also resolve the deepest *existing*
+        #       ancestor of the real write targets (the ".tmp" file open()s, and
+        #       the final filepath os.replace()s onto) and require it to stay
+        #       within download_dir.  Only existing components are resolved, so
+        #       the not-yet-existing-leaf concern that motivates (1) does not
+        #       apply here.
+        def _within(child, root):
+            try:
+                return os.path.commonpath([root, child]) == root
+            except ValueError:
+                return False
+
+        def _symlink_contained(path):
+            # Walk up to the deepest *lexically* existing ancestor.  os.path.lexists
+            # (not os.path.exists) is required so a planted symlink -- including a
+            # dangling one -- stops the walk and gets resolved, rather than being
+            # treated as a non-existent leaf and skipped.
+            ancestor = os.path.abspath(path)
+            while not os.path.lexists(ancestor):
+                parent = os.path.dirname(ancestor)
+                if parent == ancestor:
+                    break
+                ancestor = parent
+            # Decide from the *lexical* ancestor whether the walk stopped at or
+            # above download_dir (e.g. download_dir itself does not exist yet, so
+            # the walk climbed past it).  In that case no symlink *inside*
+            # download_dir could have redirected the path -- lexical containment
+            # already governs that case.  This must use the lexical ancestor, not
+            # the resolved one: a symlink that exists *inside* download_dir and
+            # points to a parent of download_dir would otherwise resolve to an
+            # ancestor of download_dir and wrongly take this early-return, even
+            # though following it escapes the download directory.
+            lex_ancestor = os.path.normcase(ancestor)
+            lex_download = os.path.normcase(
+                os.path.abspath(os.path.normpath(download_dir))
+            )
+            if _within(lex_download, lex_ancestor):
+                return True
+            # The deepest existing ancestor lives lexically below download_dir;
+            # resolve symlinks on it and require it to stay within download_dir.
+            real_ancestor = os.path.normcase(os.path.realpath(ancestor))
+            real_download = os.path.normcase(os.path.realpath(download_dir))
+            return _within(real_ancestor, real_download)
+
+        safe_download = os.path.normcase(
+            os.path.abspath(os.path.normpath(download_dir))
+        )
+        safe_filepath = os.path.normcase(os.path.abspath(os.path.normpath(filepath)))
+        if not (
+            _within(safe_filepath, safe_download)
+            and _symlink_contained(filepath)
+            and _symlink_contained(tmp_filepath)
+        ):
+            yield ErrorMessage(
+                info,
+                f"Path traversal blocked: package '{info.id}' attempted to "
+                f"write outside download directory (subdir='{info.subdir}')",
+            )
+            return
+
+        unzipdir = filepath[:-4] if filepath.endswith(".zip") else None
+        MAX_ZOMBIE_TIME = 60
+        POLL_INTERVAL = 1
+
+        def _safe_remove(path):
+            # by name, never through a link; a missing name is fine
+            try:
+                pathsec.unlink(path, context="Downloader._download_package")
+            except OSError:
+                pass
+
+        def _safe_rmtree(path):
+            # A link, file or special entry standing where the package
+            # directory belongs is stale state: removed by name, never followed
+            # (CWE-59 / CWE-22), so the extraction that follows has its
+            # directory instead of failing on ENOTDIR. A directory goes through
+            # pathsec.remove_tree, which never follows a link inside it either.
+            if os.path.islink(path) or not os.path.isdir(path):
+                if os.path.lexists(path):
+                    _safe_remove(path)
+                return
+            try:
+                pathsec.remove_tree(
+                    path, context="Downloader._download_package", ignore_errors=True
+                )
+            except OSError:
+                pass
+
+        def _touch_lock():
+            try:
+                os.utime(lock_filepath, None)
+            except OSError:
+                pass
+
+        def _lock_exists():
+            return os.path.exists(lock_filepath)
+
+        def _status_now():
+            self._status_cache.pop(info.id, None)
+            return self.status(info, download_dir)
+
+        def _installed_now():
+            if _status_now() != self.INSTALLED:
+                return False
+            # An install asked to be extracted is not done while the archive
+            # alone is on disk: the extraction below completes it with no
+            # second download, the archive having just passed its checksum.
+            return not (extract and unzipdir and not os.path.isdir(unzipdir))
+
+        # Created without a group or world write bit, and refused when another
+        # account can write one: an archive swapped in there between its
+        # checksum and the extraction would be installed as this account's.
+        try:
+            unsafe = _make_install_dirs(download_dir, info.subdir)
+        except OSError as e:
+            yield ErrorMessage(info, f"Cannot create the install directory: {e}")
+            return
+        if unsafe is not None:
+            yield ErrorMessage(
+                info,
+                f"Refusing to install into {unsafe!r}: it is writable by, or "
+                "owned by, another account, so a file swapped in during the "
+                "install would be installed as trusted data. Make it private to "
+                "its owner (chmod go-w).",
+            )
+            return
+
+        # Fast path before taking the lock.
+        # Do not return "up to date" while another process still holds the install lock.
+        if not force and _installed_now() and not _lock_exists():
             yield UpToDateMessage(info)
             yield ProgressMessage(100)
             yield FinishPackageMessage(info)
             return
 
-        # Remove the package from our status cache
-        self._status_cache.pop(info.id, None)
+        # Acquire a package-wide install lock that covers download + unzip.
+        while True:
+            if not force and _installed_now() and not _lock_exists():
+                yield UpToDateMessage(info)
+                yield ProgressMessage(100)
+                yield FinishPackageMessage(info)
+                return
 
-        # Check for (and remove) any old/stale version.
-        filepath = os.path.join(download_dir, info.filename)
-        if os.path.exists(filepath):
+            # The lock lives under the caller-chosen download dir, so bound
+            # it before creating it. O_EXCL already refuses an existing file
+            # or symlink; this stops the path leaving the sandbox at all.
+            validate_path(lock_filepath, context="downloader.lock")
+            try:
+                fd = os.open(lock_filepath, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.close(fd)
+                break
+            except FileExistsError:
+                try:
+                    age = time.time() - os.stat(lock_filepath).st_mtime
+                    if age >= MAX_ZOMBIE_TIME:
+                        _safe_remove(lock_filepath)
+                        if _lock_exists():
+                            # a stale lock this account cannot remove would
+                            # otherwise be retried forever: report it instead
+                            yield ErrorMessage(
+                                info,
+                                f"Cannot remove the stale install lock {lock_filepath!r}",
+                            )
+                            return
+                        continue
+                except FileNotFoundError:
+                    continue
+                time.sleep(POLL_INTERVAL)
+            except OSError as e:
+                # A name the filesystem refuses (too long, from the index) or
+                # a directory this account cannot write is reported, not raised.
+                yield ErrorMessage(info, f"Cannot create the install lock: {e}")
+                return
+
+        try:
+            # Recheck after lock acquisition in case another process completed first.
+            if not force and _installed_now():
+                yield UpToDateMessage(info)
+                yield ProgressMessage(100)
+                yield FinishPackageMessage(info)
+                return
+
+            status = _status_now()
+
+            # Only the lock holder may clean stale state.
             if status == self.STALE:
                 yield StaleMessage(info)
-            os.remove(filepath)
+                _safe_remove(tmp_filepath)
+                _safe_remove(filepath)
+                if unzipdir:
+                    _safe_rmtree(unzipdir)
+                self._status_cache.pop(info.id, None)
 
-        # Ensure the download_dir exists
-        if not os.path.exists(download_dir):
-            os.mkdir(download_dir)
-        if not os.path.exists(os.path.join(download_dir, info.subdir)):
-            os.mkdir(os.path.join(download_dir, info.subdir))
+            # The declared unzipped size bounds extraction below and comes
+            # from the same server, so cap it before anything is fetched. A
+            # Package always carries one; only a bare stand-in has none.
+            declared_unzipped = getattr(info, "unzipped_size", None)
+            if declared_unzipped is not None or hasattr(info, "unzipped_size"):
+                try:
+                    declared_unzipped = int(declared_unzipped)
+                except (TypeError, ValueError, OverflowError):
+                    declared_unzipped = -1
+                if not 0 <= declared_unzipped <= MAX_UNZIPPED_BYTES:
+                    yield ErrorMessage(
+                        info,
+                        f"Refusing to install {info.id!r}: the index declares "
+                        f"an unzipped size of {info.unzipped_size!r} bytes, "
+                        f"outside the 0 to {MAX_UNZIPPED_BYTES} byte range a "
+                        "package may expand to (CWE-400)",
+                    )
+                    return
 
-        # Download the file.  This will raise an IOError if the url
-        # is not found.
-        yield StartDownloadMessage(info)
-        yield ProgressMessage(5)
-        try:
-            infile = urlopen(info.url)
-            with open(filepath, "wb") as outfile:
-                num_blocks = max(1, info.size / (1024 * 16))
-                for block in itertools.count():
-                    s = infile.read(1024 * 16)  # 16k blocks.
-                    outfile.write(s)
-                    if not s:
-                        break
-                    if block % 2 == 0:  # how often?
-                        yield ProgressMessage(min(80, 5 + 75 * (block / num_blocks)))
-            infile.close()
-        except OSError as e:
-            yield ErrorMessage(
-                info,
-                "Error downloading %r from <%s>:" "\n  %s" % (info.id, info.url, e),
-            )
-            return
-        yield FinishDownloadMessage(info)
-        yield ProgressMessage(80)
+            # Download if needed.
+            if force or not os.path.exists(filepath):
+                yield StartDownloadMessage(info)
+                yield ProgressMessage(5)
 
-        # If it's a zipfile, uncompress it.
-        if info.filename.endswith(".zip"):
-            zipdir = os.path.join(download_dir, info.subdir)
-            # Unzip if we're unzipping by default; *or* if it's already
-            # been unzipped (presumably a previous version).
-            if info.unzip or os.path.exists(os.path.join(zipdir, info.id)):
-                yield StartUnzipMessage(info)
-                for msg in _unzip_iter(filepath, zipdir, verbose=False):
-                    # Somewhat of a hack, but we need a proper package reference
-                    msg.package = info
-                    yield msg
-                yield FinishUnzipMessage(info)
+                # The declared size bounds the body below, and it comes from the
+                # same server, so cap it too: nothing is fetched for a package
+                # that claims more than MAX_PACKAGE_BYTES.
+                try:
+                    declared = int(info.size)
+                except (TypeError, ValueError, OverflowError):
+                    declared = None
+                if declared is None or not 0 <= declared <= MAX_PACKAGE_BYTES:
+                    yield ErrorMessage(
+                        info,
+                        f"Refusing to download {info.id!r}: the index declares "
+                        f"{info.size!r} bytes, outside the 0 to "
+                        f"{MAX_PACKAGE_BYTES} byte range a package may have "
+                        "(CWE-400)",
+                    )
+                    return
 
-        yield FinishPackageMessage(info)
+                infile = None
+                try:
+                    infile = urlopen(info.url, timeout=NETWORK_TIMEOUT)
+                    budget = _package_deadline(declared)
+                    deadline = time.monotonic() + budget
+                    # read1 hands back what one socket read produced, so a
+                    # dripping server meets the deadline per trickle instead
+                    # of after a full block; only a real buffered stream has it.
+                    read = (
+                        infile.read1
+                        if isinstance(infile, io.BufferedIOBase)
+                        else infile.read
+                    )
+                    with pathsec_open(
+                        tmp_filepath,
+                        "wb",
+                        context="Downloader._download_package",
+                        required_root=download_dir,
+                    ) as outfile:
+                        num_blocks = max(1, declared / (1024 * 16))
+                        # Never ask for, or write, a byte past the declared size:
+                        # one byte more already proves the body is not the
+                        # package, so a server cannot fill the disk (CWE-400).
+                        bytes_read = 0
+                        overflow = False
+                        for block in itertools.count():
+                            s = read(min(1024 * 16, declared + 1 - bytes_read))
+                            if not s:
+                                break
+                            bytes_read += len(s)
+                            if bytes_read > declared:
+                                overflow = True
+                                break
+                            outfile.write(s)
+                            if time.monotonic() > deadline:
+                                raise ValueError(
+                                    f"the body took longer than its {budget:.0f} "
+                                    "second time budget to arrive; refusing a "
+                                    "drip-fed package (CWE-400)"
+                                )
+                            if block % 2 == 0:
+                                _touch_lock()
+                                yield ProgressMessage(
+                                    min(80, 5 + 75 * (block / num_blocks))
+                                )
+                    infile.close()
+                    if overflow:
+                        _safe_remove(tmp_filepath)
+                        yield ErrorMessage(
+                            info,
+                            f"Integrity check failed for {info.id!r}: size "
+                            f"mismatch (the body runs past the declared "
+                            f"{declared} bytes)",
+                        )
+                        return
+                    # --- CVE-2026-12261 fix (integrity before commit) ---
+                    # Validate size and sha256 on the temp file BEFORE
+                    # replacing the destination.  This closes the window
+                    # where a tampered archive could be extracted while the
+                    # integrity check was still deferred to status logic.
+                    tmp_size = os.path.getsize(tmp_filepath)
+                    if tmp_size != declared:
+                        _safe_remove(tmp_filepath)
+                        yield ErrorMessage(
+                            info,
+                            f"Integrity check failed for {info.id!r}: "
+                            f"size mismatch (got {tmp_size}, expected {info.size})",
+                        )
+                        return
+
+                    sha256_checksum = getattr(info, "sha256_checksum", None)
+
+                    if sha256_checksum:
+                        if sha256_hexdigest(tmp_filepath) != sha256_checksum:
+                            _safe_remove(tmp_filepath)
+                            yield ErrorMessage(
+                                info,
+                                f"Integrity check failed for {info.id!r}: sha256 mismatch",
+                            )
+                            return
+                    else:
+                        md5_checksum = getattr(info, "checksum", None)
+
+                        if md5_checksum and md5_hexdigest(tmp_filepath) != md5_checksum:
+                            _safe_remove(tmp_filepath)
+                            yield ErrorMessage(
+                                info,
+                                f"Integrity check failed for {info.id!r}: md5 mismatch",
+                            )
+                            return
+                    # ---------------------------------------------------
+
+                    validate_path(
+                        filepath,
+                        context="Downloader._download_package",
+                        required_root=download_dir,
+                    )
+                    pathsec.replace(
+                        tmp_filepath, filepath, context="Downloader._download_package"
+                    )
+                    self._status_cache.pop(info.id, None)
+                except (OSError, ValueError, http.client.HTTPException) as e:
+                    # A malformed status line, a truncated body or a refused URL
+                    # is a failed download, reported like any other, not a crash
+                    # that prints the server's raw text in a traceback.
+                    _safe_remove(tmp_filepath)
+                    yield ErrorMessage(
+                        info,
+                        "Error downloading %r from <%s>:"
+                        "\n  %s" % (info.id, info.url, e),
+                    )
+                    return
+                finally:
+                    if infile is not None:
+                        infile.close()
+
+                yield FinishDownloadMessage(info)
+                yield ProgressMessage(80)
+
+            # Unzip while still holding the same install lock.
+            if info.filename.endswith(".zip"):
+                zipdir = os.path.join(download_dir, info.subdir)
+                # extract unpacks a package the index leaves zipped: the archive
+                # stays private to the installing account (0600), the extracted
+                # files are readable by other accounts and are found before it.
+                if (
+                    info.unzip
+                    or extract
+                    or os.path.exists(os.path.join(zipdir, info.id))
+                ):
+                    yield StartUnzipMessage(info)
+                    # --- CVE-2026-12261 fix (member ownership enforcement) ---
+                    # Pass info.id so _unzip_iter can reject any archive member
+                    # whose top-level path component is not the owning package.
+                    # zipdir itself stays as download_dir/subdir/ to preserve
+                    # the layout expected by _pkg_status and NLTK data loaders.
+                    for msg in _unzip_iter(
+                        filepath,
+                        zipdir,
+                        verbose=False,
+                        expected_root=info.id,
+                        expected_size=declared_unzipped,
+                        verified=True,
+                    ):
+                        _touch_lock()
+                        msg.package = info
+                        yield msg
+                        if isinstance(msg, ErrorMessage):
+                            return
+                    yield FinishUnzipMessage(info)
+
+            # Final verification: followers should only ever observe INSTALLED.
+            if not _installed_now():
+                yield ErrorMessage(
+                    info,
+                    f"Package {info.id!r} did not reach installed state "
+                    f"(final status: {_status_now()})",
+                )
+                return
+
+            yield FinishPackageMessage(info)
+
+        finally:
+            _safe_remove(tmp_filepath)
+            _safe_remove(lock_filepath)
 
     def download(
         self,
@@ -749,9 +1512,19 @@ class Downloader:
         halt_on_error=True,
         raise_on_error=False,
         print_error_to=sys.stderr,
+        hf=False,
+        extract=None,
     ):
+        # extract=True also unpacks packages the index leaves zipped (wordnet,
+        # omw-1.4 ...) so other accounts can read them; None does so for a
+        # shared install (made as root or outside this account's home).
+        # Delegate to HuggingFace downloader when hf=True.
+        if hf and info_or_id is not None:
+            from nltk.huggingface.dataset import download as hf_download
 
-        print_to = functools.partial(print, file=print_error_to)
+            return hf_download(info_or_id, quiet=quiet)
+
+        print_to = functools.partial(safe_print, file=print_error_to)
         # If no info or id is given, then use the interactive shell.
         if info_or_id is None:
             # [xx] hmm -- changing self._download_dir here seems like
@@ -765,15 +1538,22 @@ class Downloader:
         else:
             # Define a helper function for displaying output:
             def show(s, prefix2=""):
+                # A message is one logical line: flatten its line breaks here,
+                # not by relying on fill's default (an entity-form LF from the
+                # index survives XML parsing), then check each wrapped line.
                 print_to(
-                    textwrap.fill(
-                        s,
-                        initial_indent=prefix + prefix2,
-                        subsequent_indent=prefix + prefix2 + " " * 4,
+                    _one_line_each(
+                        textwrap.fill(
+                            sanitize_terminal(s).replace("\n", " "),
+                            initial_indent=prefix + prefix2,
+                            subsequent_indent=prefix + prefix2 + " " * 4,
+                        )
                     )
                 )
 
-            for msg in self.incr_download(info_or_id, download_dir, force):
+            for msg in self.incr_download(
+                info_or_id, download_dir, force, extract=extract
+            ):
                 # Error messages
                 if isinstance(msg, ErrorMessage):
                     show(msg.message)
@@ -794,6 +1574,7 @@ class Downloader:
                                 prefix,
                                 halt_on_error,
                                 raise_on_error,
+                                extract=extract,
                             ):
                                 return False
                         elif choice in ["e", "E"]:
@@ -893,27 +1674,99 @@ class Downloader:
             return self.NOT_INSTALLED
         if filestat.st_size != int(info.size):
             return self.STALE
-
-        # Check if the file's checksum matches
-        if md5_hexdigest(filepath) != info.checksum:
+        # An archive another account owns or can write may change after its
+        # checksum: stale, so the next download replaces it with a private one.
+        if _not_ours(filestat):
             return self.STALE
+
+        # An archive another account installed is private to it (0600): this
+        # account cannot checksum it. Its extracted files, if any, are what this
+        # account reads, so they are judged below; with none, nothing is usable.
+        if not os.access(filepath, os.R_OK):
+            unzipdir = filepath[:-4] if filepath.endswith(".zip") else None
+            if not (unzipdir and os.path.isdir(unzipdir)):
+                return self.NOT_INSTALLED
+            return self._unzipped_status(info, unzipdir)
+
+        # Check if the file's checksum matches.
+        # Prefer sha256, but fall back to legacy md5 if sha256 is unavailable.
+        sha256_checksum = getattr(info, "sha256_checksum", None)
+        if sha256_checksum:
+            if sha256_hexdigest(filepath) != sha256_checksum:
+                return self.STALE
+        else:
+            if not getattr(self, "_warned_missing_sha256_checksum", False):
+                warnings.warn(
+                    "NLTK downloader package metadata is missing SHA256 checksums; "
+                    "falling back to legacy MD5 verification. Consider updating your "
+                    "NLTK data index (or re-running the downloader) to get SHA256 checksums.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                self._warned_missing_sha256_checksum = True
+
+            md5_checksum = getattr(info, "checksum", None)
+            if not md5_checksum:
+                return self.STALE
+            if md5_hexdigest(filepath) != md5_checksum:
+                return self.STALE
 
         # If it's a zipfile, and it's been at least partially
         # unzipped, then check if it's been fully unzipped.
         if filepath.endswith(".zip"):
             unzipdir = filepath[:-4]
             if not os.path.exists(unzipdir):
-                return self.INSTALLED  # but not unzipped -- ok!
-            if not os.path.isdir(unzipdir):
+                return self.NOT_INSTALLED if info.unzip else self.INSTALLED
+            status = self._unzipped_status(info, unzipdir)
+            # The total misses a removed empty file (punkt_tab ships two), which
+            # the tokenizer then reports missing while this said up to date.
+            if status == self.INSTALLED and not _archived_files_in_place(filepath):
                 return self.STALE
+            return status
 
-            unzipped_size = sum(
-                os.stat(os.path.join(d, f)).st_size
-                for d, _, files in os.walk(unzipdir)
-                for f in files
-            )
-            if unzipped_size != info.unzipped_size:
-                return self.STALE
+        # Otherwise, everything looks good.
+        return self.INSTALLED
+
+    def _unzipped_status(self, info, unzipdir):
+        """The install state of a package's extracted directory."""
+        # The directory itself is judged first, by lstat: a link standing
+        # where the package directory belongs, or a directory another
+        # account owns or can write to, is stale whatever it holds.
+        try:
+            top = os.lstat(unzipdir)
+        except OSError:
+            return self.STALE
+        if (
+            not stat.S_ISDIR(top.st_mode)
+            or getattr(top, "st_reparse_tag", 0)
+            or _not_ours(top)
+        ):
+            return self.STALE
+
+        # A link, junction or special entry planted in the tree is never
+        # part of an install, so it is stale outright (on Windows a link's
+        # lstat size is 0, so the size sum alone would not see it). A regular
+        # file with a second name (a hardlink to another file) is stale too:
+        # its size can match the package while its bytes are someone else's.
+        unzipped_size = 0
+        for d, dirs, files in os.walk(unzipdir):
+            for name in dirs + files:
+                try:
+                    st = os.lstat(os.path.join(d, name))
+                except OSError:
+                    return self.STALE
+                if (
+                    stat.S_ISLNK(st.st_mode)
+                    or getattr(st, "st_reparse_tag", 0)
+                    or not (stat.S_ISREG(st.st_mode) or stat.S_ISDIR(st.st_mode))
+                    or (stat.S_ISREG(st.st_mode) and st.st_nlink > 1)
+                    or _not_ours(st)
+                ):
+                    return self.STALE
+                if stat.S_ISREG(st.st_mode):
+                    unzipped_size += st.st_size
+        if unzipped_size != info.unzipped_size:
+            return self.STALE
 
         # Otherwise, everything looks good.
         return self.INSTALLED
@@ -932,29 +1785,54 @@ class Downloader:
     # /////////////////////////////////////////////////////////////////
 
     def _update_index(self, url=None):
-        """A helper function that ensures that self._index is
-        up-to-date.  If the index is older than self.INDEX_TIMEOUT,
-        then download it again."""
-        # Check if the index is already up-to-date.  If so, do nothing.
+        """
+        A helper function that ensures that self._index is up-to-date.
+        If the index is older than self.INDEX_TIMEOUT, then download it again.
+        """
+        # If a URL was specified, then update our URL.
+        self._url = url or self._url
+
+        # Check if the index is already up-to-date.  If so, do nothing. An
+        # explicit url always refetches (the callers' way to force a refresh),
+        # and so does an index fetched from another URL, however fresh it is;
+        # an index installed by hand has no origin URL and is kept as it is.
+        index_url = getattr(self, "_index_url", None)
         if not (
             self._index is None
             or url is not None
+            or (index_url is not None and self._url != index_url)
             or time.time() - self._index_timestamp > self.INDEX_TIMEOUT
         ):
             return
 
-        # If a URL was specified, then update our URL.
-        self._url = url or self._url
-
-        # Download the index file.
-        self._index = nltk.internals.ElementWrapper(
-            ElementTree.parse(urlopen(self._url)).getroot()
-        )
+        # Download the index bounded in bytes and in time, and count its
+        # structure before a tree is built: an endless or drip-fed index, or
+        # one whose tree dwarfs its bytes, is refused (CWE-400).
+        try:
+            body = _bounded_body(
+                urlopen(self._url, timeout=NETWORK_TIMEOUT),
+                MAX_INDEX_BYTES,
+                "data index",
+                deadline=time.monotonic() + INDEX_DEADLINE,
+            )
+        except http.client.HTTPException as e:
+            # Its text is the server's raw status line or header; never let a
+            # traceback print that unsanitised (CWE-150).
+            raise ValueError(
+                "The data server sent a malformed response for the index: "
+                + sanitize_terminal(repr(e))
+            ) from None
+        with body.getbuffer() as view:
+            _check_index_structure(view)
+        self._index = nltk.internals.ElementWrapper(safe_parse(body).getroot())
         self._index_timestamp = time.time()
+        self._index_url = self._url
 
         # Build a dictionary of packages.
         packages = [Package.fromxml(p) for p in self._index.findall("packages/package")]
-        self._packages = {p.id: p for p in packages}
+        packages = {p.id: p for p in packages}
+        _refuse_install_aliases(packages.values())
+        self._packages = packages
 
         # Build a dictionary of collections.
         collections = [
@@ -963,31 +1841,39 @@ class Downloader:
         self._collections = {c.id: c for c in collections}
 
         # Replace identifiers with actual children in collection.children.
+        # The list is rebuilt, not edited while enumerated: deleting in place
+        # skipped the ref after each removed one, so a dangling ref survived.
         for collection in self._collections.values():
-            for i, child_id in enumerate(collection.children):
+            resolved = []
+            for child_id in collection.children:
                 if child_id in self._packages:
-                    collection.children[i] = self._packages[child_id]
+                    resolved.append(self._packages[child_id])
                 elif child_id in self._collections:
-                    collection.children[i] = self._collections[child_id]
+                    resolved.append(self._collections[child_id])
                 else:
-                    print(
+                    # single_line: a ref holding a line break cannot forge a line
+                    safe_print(
                         "removing collection member with no package: {}".format(
-                            child_id
-                        )
+                            sanitize_terminal(child_id)  # server-supplied ref
+                        ),
+                        single_line=True,
                     )
-                    del collection.children[i]
+            collection.children[:] = resolved
 
         # Fill in collection.packages for each collection.
+        # Use acyclic_breadth_first to safely traverse the collection graph,
+        # avoiding infinite loops from self-referential or mutually-referential cycles.
         for collection in self._collections.values():
             packages = {}
-            queue = [collection]
-            for child in queue:
-                if isinstance(child, Collection):
-                    queue.extend(child.children)
-                elif isinstance(child, Package):
+            for child in acyclic_breadth_first(
+                collection,
+                children=lambda node: (
+                    node.children if isinstance(node, Collection) else ()
+                ),
+                verbose=False,
+            ):
+                if isinstance(child, Package):
                     packages[child.id] = child
-                else:
-                    pass
             collection.packages = packages.values()
 
         # Flush the status cache
@@ -1039,7 +1925,7 @@ class Downloader:
         original_url = self._url
         try:
             self._update_index(url)
-        except:
+        except Exception:
             self._url = original_url
             raise
 
@@ -1072,7 +1958,7 @@ class Downloader:
                 return nltkdir
 
         # On Windows, use %APPDATA%
-        if sys.platform == "win32" and "APPDATA" in os.environ:
+        if os.name == "nt" and "APPDATA" in os.environ:
             homedir = os.environ["APPDATA"]
 
         # Otherwise, install in the user's home directory.
@@ -1105,14 +1991,26 @@ class Downloader:
     # /////////////////////////////////////////////////////////////////
 
     def _interactive_download(self):
+        # Only import tkinter if the user has indicated that they
+        # want to draw a UI. See issue #2949 for more info.
+        if (
+            os.environ.get("NLTK_DOWNLOADER_FORCE_INTERACTIVE_SHELL", "false").lower()
+            == "true"
+        ):
+            DownloaderShell(self).run()
+            return
+
         # Try the GUI first; if that doesn't work, try the simple
         # interactive shell.
-        if TKINTER:
-            try:
-                DownloaderGUI(self).mainloop()
-            except TclError:
-                DownloaderShell(self).run()
-        else:
+        try:
+            import tkinter
+        except ImportError:
+            DownloaderShell(self).run()
+            return
+
+        try:
+            DownloaderGUI(self).mainloop()
+        except tkinter.TclError:
             DownloaderShell(self).run()
 
 
@@ -1121,13 +2019,13 @@ class DownloaderShell:
         self._ds = dataserver
 
     def _simple_interactive_menu(self, *options):
-        print("-" * 75)
+        safe_print("-" * 75)
         spc = (68 - sum(len(o) for o in options)) // (len(options) - 1) * " "
-        print("    " + spc.join(options))
-        print("-" * 75)
+        safe_print("    " + spc.join(options))
+        safe_print("-" * 75)
 
     def run(self):
-        print("NLTK Downloader")
+        safe_print("NLTK Downloader")
         while True:
             self._simple_interactive_menu(
                 "d) Download",
@@ -1139,13 +2037,13 @@ class DownloaderShell:
             )
             user_input = input("Downloader> ").strip()
             if not user_input:
-                print()
+                safe_print()
                 continue
             command = user_input.lower().split()[0]
             args = user_input.split()[1:]
             try:
                 if command == "l":
-                    print()
+                    safe_print()
                     self._ds.list(self._ds.download_dir, header=False, more_prompt=True)
                 elif command == "h":
                     self._simple_interactive_help()
@@ -1158,14 +2056,14 @@ class DownloaderShell:
                 elif command == "u":
                     self._simple_interactive_update()
                 else:
-                    print("Command %r unrecognized" % user_input)
+                    safe_print("Command %r unrecognized" % user_input)
             except HTTPError as e:
-                print("Error reading from server: %s" % e)
+                safe_print("Error reading from server: %s" % e)
             except URLError as e:
-                print("Error connecting to server: %s" % e.reason)
+                safe_print("Error connecting to server: %s" % e.reason)
             # try checking if user_input is a package name, &
             # downloading it?
-            print()
+            safe_print()
 
     def _simple_interactive_download(self, args):
         if args:
@@ -1173,11 +2071,11 @@ class DownloaderShell:
                 try:
                     self._ds.download(arg, prefix="    ")
                 except (OSError, ValueError) as e:
-                    print(e)
+                    safe_print(e)
         else:
             while True:
-                print()
-                print("Download which package (l=list; x=cancel)?")
+                safe_print()
+                safe_print("Download which package (l=list; x=cancel)?")
                 user_input = input("  Identifier> ")
                 if user_input.lower() == "l":
                     self._ds.list(
@@ -1194,7 +2092,7 @@ class DownloaderShell:
                         try:
                             self._ds.download(id, prefix="    ")
                         except (OSError, ValueError) as e:
-                            print(e)
+                            safe_print(e)
                     break
 
     def _simple_interactive_update(self):
@@ -1205,15 +2103,18 @@ class DownloaderShell:
                 if self._ds.status(info) == self._ds.STALE:
                     stale_packages.append((info.id, info.name))
 
-            print()
+            safe_print()
             if stale_packages:
-                print("Will update following packages (o=ok; x=cancel)")
+                safe_print("Will update following packages (o=ok; x=cancel)")
                 for pid, pname in stale_packages:
                     name = textwrap.fill(
-                        "-" * 27 + (pname), 75, subsequent_indent=27 * " "
+                        "-" * 27 + sanitize_terminal(pname, single_line=True),
+                        75,
+                        subsequent_indent=27 * " ",
                     )[27:]
-                    print("  [ ] {} {}".format(pid.ljust(20, "."), name))
-                print()
+                    name = _one_line_each(name)
+                    safe_print("  [ ] {} {}".format(pid.ljust(20, "."), name))
+                safe_print()
 
                 user_input = input("  Identifier> ")
                 if user_input.lower() == "o":
@@ -1221,37 +2122,37 @@ class DownloaderShell:
                         try:
                             self._ds.download(pid, prefix="    ")
                         except (OSError, ValueError) as e:
-                            print(e)
+                            safe_print(e)
                     break
                 elif user_input.lower() in ("x", "q", ""):
                     return
             else:
-                print("Nothing to update.")
+                safe_print("Nothing to update.")
                 return
 
     def _simple_interactive_help(self):
-        print()
-        print("Commands:")
-        print(
+        safe_print()
+        safe_print("Commands:")
+        safe_print(
             "  d) Download a package or collection     u) Update out of date packages"
         )
-        print("  l) List packages & collections          h) Help")
-        print("  c) View & Modify Configuration          q) Quit")
+        safe_print("  l) List packages & collections          h) Help")
+        safe_print("  c) View & Modify Configuration          q) Quit")
 
     def _show_config(self):
-        print()
-        print("Data Server:")
-        print("  - URL: <%s>" % self._ds.url)
-        print("  - %d Package Collections Available" % len(self._ds.collections()))
-        print("  - %d Individual Packages Available" % len(self._ds.packages()))
-        print()
-        print("Local Machine:")
-        print("  - Data directory: %s" % self._ds.download_dir)
+        safe_print()
+        safe_print("Data Server:")
+        safe_print("  - URL: <%s>" % self._ds.url)
+        safe_print("  - %d Package Collections Available" % len(self._ds.collections()))
+        safe_print("  - %d Individual Packages Available" % len(self._ds.packages()))
+        safe_print()
+        safe_print("Local Machine:")
+        safe_print("  - Data directory: %s" % self._ds.download_dir)
 
     def _simple_interactive_config(self):
         self._show_config()
         while True:
-            print()
+            safe_print()
             self._simple_interactive_menu(
                 "s) Show Config", "u) Set Server URL", "d) Set Data Dir", "m) Main Menu"
             )
@@ -1261,22 +2162,22 @@ class DownloaderShell:
             elif user_input == "d":
                 new_dl_dir = input("  New Directory> ").strip()
                 if new_dl_dir in ("", "x", "q", "X", "Q"):
-                    print("  Cancelled!")
+                    safe_print("  Cancelled!")
                 elif os.path.isdir(new_dl_dir):
                     self._ds.download_dir = new_dl_dir
                 else:
-                    print("Directory %r not found!  Create it first." % new_dl_dir)
+                    safe_print("Directory %r not found!  Create it first." % new_dl_dir)
             elif user_input == "u":
                 new_url = input("  New URL> ").strip()
                 if new_url in ("", "x", "q", "X", "Q"):
-                    print("  Cancelled!")
+                    safe_print("  Cancelled!")
                 else:
                     if not new_url.startswith(("http://", "https://")):
-                        new_url = "http://" + new_url
+                        new_url = "https://" + new_url
                     try:
                         self._ds.url = new_url
                     except Exception as e:
-                        print(f"Error reading <{new_url!r}>:\n  {e}")
+                        safe_print(f"Error reading <{new_url!r}>:\n  {e}")
             elif user_input == "m":
                 break
 
@@ -1372,6 +2273,11 @@ class DownloaderGUI:
     # /////////////////////////////////////////////////////////////////
 
     def __init__(self, dataserver, use_threads=True):
+        # Only import tkinter if the user has indicated that they
+        # want to draw a UI. See issue #2949 for more info.
+        import tkinter
+        from tkinter.messagebox import showerror
+
         self._ds = dataserver
         self._use_threads = use_threads
 
@@ -1390,7 +2296,7 @@ class DownloaderGUI:
         self._log("NLTK Downloader Started!")
 
         # Create the main window.
-        top = self.top = Tk()
+        top = self.top = tkinter.Tk()
         top.geometry("+50+50")
         top.title("NLTK Downloader")
         top.configure(background=self._BACKDROP_COLOR[1])
@@ -1430,23 +2336,29 @@ class DownloaderGUI:
     # /////////////////////////////////////////////////////////////////
 
     def _init_widgets(self):
+        # Only import tkinter if the user has indicated that they
+        # want to draw a UI. See issue #2949 for more info.
+        import tkinter
+
+        from nltk.draw.table import Table
+
         # Create the top-level frame structures
-        f1 = Frame(self.top, relief="raised", border=2, padx=8, pady=0)
+        f1 = tkinter.Frame(self.top, relief="raised", border=2, padx=8, pady=0)
         f1.pack(sid="top", expand=True, fill="both")
         f1.grid_rowconfigure(2, weight=1)
         f1.grid_columnconfigure(0, weight=1)
-        Frame(f1, height=8).grid(column=0, row=0)  # spacer
-        tabframe = Frame(f1)
+        tkinter.Frame(f1, height=8).grid(column=0, row=0)  # spacer
+        tabframe = tkinter.Frame(f1)
         tabframe.grid(column=0, row=1, sticky="news")
-        tableframe = Frame(f1)
+        tableframe = tkinter.Frame(f1)
         tableframe.grid(column=0, row=2, sticky="news")
-        buttonframe = Frame(f1)
+        buttonframe = tkinter.Frame(f1)
         buttonframe.grid(column=0, row=3, sticky="news")
-        Frame(f1, height=8).grid(column=0, row=4)  # spacer
-        infoframe = Frame(f1)
+        tkinter.Frame(f1, height=8).grid(column=0, row=4)  # spacer
+        infoframe = tkinter.Frame(f1)
         infoframe.grid(column=0, row=5, sticky="news")
-        Frame(f1, height=8).grid(column=0, row=6)  # spacer
-        progressframe = Frame(
+        tkinter.Frame(f1, height=8).grid(column=0, row=6)  # spacer
+        progressframe = tkinter.Frame(
             self.top, padx=3, pady=3, background=self._BACKDROP_COLOR[1]
         )
         progressframe.pack(side="bottom", fill="x")
@@ -1457,7 +2369,7 @@ class DownloaderGUI:
         self._tab_names = ["Collections", "Corpora", "Models", "All Packages"]
         self._tabs = {}
         for i, tab in enumerate(self._tab_names):
-            label = Label(tabframe, text=tab, font=self._TAB_FONT)
+            label = tkinter.Label(tabframe, text=tab, font=self._TAB_FONT)
             label.pack(side="left", padx=((i + 1) % 2) * 10)
             label.bind("<Button-1>", self._select_tab)
             self._tabs[tab.lower()] = label
@@ -1493,10 +2405,14 @@ class DownloaderGUI:
             ("download_dir", "Download Directory:", self._set_download_dir),
         ]
         self._info = {}
-        for (i, (key, label, callback)) in enumerate(info):
-            Label(infoframe, text=label).grid(column=0, row=i, sticky="e")
-            entry = Entry(
-                infoframe, font="courier", relief="groove", disabledforeground="black"
+        for i, (key, label, callback) in enumerate(info):
+            tkinter.Label(infoframe, text=label).grid(column=0, row=i, sticky="e")
+            entry = tkinter.Entry(
+                infoframe,
+                font="courier",
+                relief="groove",
+                disabledforeground="#007aff",
+                foreground="#007aff",
             )
             self._info[key] = (entry, callback)
             entry.bind("<Return>", self._info_save)
@@ -1508,23 +2424,23 @@ class DownloaderGUI:
         self.top.bind("<Button-1>", self._info_save)
 
         # Create Download & Refresh buttons.
-        self._download_button = Button(
+        self._download_button = tkinter.Button(
             buttonframe, text="Download", command=self._download, width=8
         )
         self._download_button.pack(side="left")
-        self._refresh_button = Button(
+        self._refresh_button = tkinter.Button(
             buttonframe, text="Refresh", command=self._refresh, width=8
         )
         self._refresh_button.pack(side="right")
 
         # Create Progress bar
-        self._progresslabel = Label(
+        self._progresslabel = tkinter.Label(
             progressframe,
             text="",
             foreground=self._BACKDROP_COLOR[0],
             background=self._BACKDROP_COLOR[1],
         )
-        self._progressbar = Canvas(
+        self._progressbar = tkinter.Canvas(
             progressframe,
             width=200,
             height=16,
@@ -1537,9 +2453,11 @@ class DownloaderGUI:
         self._progresslabel.pack(side="left")
 
     def _init_menu(self):
-        menubar = Menu(self.top)
+        import tkinter
 
-        filemenu = Menu(menubar, tearoff=0)
+        menubar = tkinter.Menu(self.top)
+
+        filemenu = tkinter.Menu(menubar, tearoff=0)
         filemenu.add_command(
             label="Download", underline=0, command=self._download, accelerator="Return"
         )
@@ -1565,9 +2483,9 @@ class DownloaderGUI:
         # Create a menu to control which columns of the table are
         # shown.  n.b.: we never hide the first two columns (mark and
         # identifier).
-        viewmenu = Menu(menubar, tearoff=0)
+        viewmenu = tkinter.Menu(menubar, tearoff=0)
         for column in self._table.column_names[2:]:
-            var = IntVar(self.top)
+            var = tkinter.IntVar(self.top)
             assert column not in self._column_vars
             self._column_vars[column] = var
             if column in self.INITIAL_COLUMNS:
@@ -1580,7 +2498,7 @@ class DownloaderGUI:
         # Create a sort menu
         # [xx] this should be selectbuttons; and it should include
         # reversed sorts as options.
-        sortmenu = Menu(menubar, tearoff=0)
+        sortmenu = tkinter.Menu(menubar, tearoff=0)
         for column in self._table.column_names[1:]:
             sortmenu.add_command(
                 label="Sort by %s" % column,
@@ -1595,7 +2513,7 @@ class DownloaderGUI:
             )
         menubar.add_cascade(label="Sort", underline=0, menu=sortmenu)
 
-        helpmenu = Menu(menubar, tearoff=0)
+        helpmenu = tkinter.Menu(menubar, tearoff=0)
         helpmenu.add_command(label="About", underline=0, command=self.about)
         helpmenu.add_command(
             label="Instructions", underline=0, command=self.help, accelerator="F1"
@@ -1606,13 +2524,15 @@ class DownloaderGUI:
         self.top.config(menu=menubar)
 
     def _select_columns(self):
-        for (column, var) in self._column_vars.items():
+        for column, var in self._column_vars.items():
             if var.get():
                 self._table.show_column(column)
             else:
                 self._table.hide_column(column)
 
     def _refresh(self):
+        from tkinter.messagebox import showerror
+
         self._ds.clear_status_cache()
         try:
             self._fill_table()
@@ -1624,7 +2544,7 @@ class DownloaderGUI:
 
     def _info_edit(self, info_key):
         self._info_save()  # just in case.
-        (entry, callback) = self._info[info_key]
+        entry, callback = self._info[info_key]
         entry["state"] = "normal"
         entry["relief"] = "sunken"
         entry.focus()
@@ -1646,12 +2566,12 @@ class DownloaderGUI:
         if self._table.column_names[col].endswith("Size"):
             if isinstance(val, str):
                 return "  %s" % val
-            elif val < 1024 ** 2:
-                return "  %.1f KB" % (val / 1024.0 ** 1)
-            elif val < 1024 ** 3:
-                return "  %.1f MB" % (val / 1024.0 ** 2)
+            elif val < 1024**2:
+                return "  %.1f KB" % (val / 1024.0**1)
+            elif val < 1024**3:
+                return "  %.1f MB" % (val / 1024.0**2)
             else:
-                return "  %.1f GB" % (val / 1024.0 ** 3)
+                return "  %.1f GB" % (val / 1024.0**3)
 
         if col in (0, ""):
             return str(val)
@@ -1659,6 +2579,8 @@ class DownloaderGUI:
             return "  %s" % val
 
     def _set_url(self, url):
+        from tkinter.messagebox import showerror
+
         if url == self._ds.url:
             return
         try:
@@ -1669,6 +2591,8 @@ class DownloaderGUI:
         self._show_info()
 
     def _set_download_dir(self, download_dir):
+        from tkinter.messagebox import showerror
+
         if self._ds.download_dir == download_dir:
             return
         # check if the dir exists, and if not, ask if we should create it?
@@ -1684,7 +2608,7 @@ class DownloaderGUI:
         self._show_info()
 
     def _show_info(self):
-        print("showing info", self._ds.url)
+        safe_print("showing info", self._ds.url)
         for entry, cb in self._info.values():
             entry["state"] = "normal"
             entry.delete(0, "end")
@@ -1694,6 +2618,8 @@ class DownloaderGUI:
             entry["state"] = "disabled"
 
     def _prev_tab(self, *e):
+        from tkinter.messagebox import showerror
+
         for i, tab in enumerate(self._tab_names):
             if tab.lower() == self._tab and i > 0:
                 self._tab = self._tab_names[i - 1].lower()
@@ -1705,6 +2631,8 @@ class DownloaderGUI:
                     showerror("Error connecting to server", e.reason)
 
     def _next_tab(self, *e):
+        from tkinter.messagebox import showerror
+
         for i, tab in enumerate(self._tab_names):
             if tab.lower() == self._tab and i < (len(self._tabs) - 1):
                 self._tab = self._tab_names[i + 1].lower()
@@ -1716,6 +2644,8 @@ class DownloaderGUI:
                     showerror("Error connecting to server", e.reason)
 
     def _select_tab(self, event):
+        from tkinter.messagebox import showerror
+
         self._tab = event.widget["text"].lower()
         try:
             self._fill_table()
@@ -1882,6 +2812,8 @@ class DownloaderGUI:
         self._table.select(delta=1)
 
     def _show_log(self):
+        from nltk.draw.util import ShowText
+
         text = "\n".join(self._log_messages)
         ShowText(self.top, "NLTK Downloader Log", text)
 
@@ -1964,6 +2896,8 @@ class DownloaderGUI:
     )
 
     def help(self, *e):
+        from nltk.draw.util import ShowText
+
         # The default font's not very legible; try using 'fixed' instead.
         try:
             ShowText(
@@ -1973,10 +2907,12 @@ class DownloaderGUI:
                 width=75,
                 font="fixed",
             )
-        except:
+        except Exception:
             ShowText(self.top, "Help: NLTK Downloader", self.HELP.strip(), width=75)
 
     def about(self, *e):
+        from nltk.draw.util import ShowText
+
         ABOUT = "NLTK Downloader\n" + "Written by Edward Loper"
         TITLE = "About: NLTK Downloader"
         try:
@@ -2124,7 +3060,6 @@ class DownloaderGUI:
         if not self._download_lock.acquire():
             return
         for msg in self._download_msg_queue:
-
             # Done downloading?
             if msg == "finished" or msg == "aborted":
                 # self._fill_table(sort=False)
@@ -2204,7 +3139,7 @@ def md5_hexdigest(file):
     ``file`` may either be a filename or an open stream.
     """
     if isinstance(file, str):
-        with open(file, "rb") as infile:
+        with pathsec_open(file, "rb", context="downloader.checksum") as infile:
             return _md5_hexdigest(infile)
     return _md5_hexdigest(file)
 
@@ -2217,6 +3152,27 @@ def _md5_hexdigest(fp):
             break
         md5_digest.update(block)
     return md5_digest.hexdigest()
+
+
+def sha256_hexdigest(file):
+    """
+    Calculate and return the SHA-256 checksum for a given file.
+    ``file`` may either be a filename or an open stream.
+    """
+    if isinstance(file, str):
+        with pathsec_open(file, "rb", context="downloader.checksum") as infile:
+            return _sha256_hexdigest(infile)
+    return _sha256_hexdigest(file)
+
+
+def _sha256_hexdigest(fp):
+    sha256_digest = sha256()
+    while True:
+        block = fp.read(1024 * 16)  # 16k blocks
+        if not block:
+            break
+        sha256_digest.update(block)
+    return sha256_digest.hexdigest()
 
 
 # change this to periodically yield progress messages?
@@ -2232,24 +3188,330 @@ def unzip(filename, root, verbose=True):
             raise Exception(message)
 
 
-def _unzip_iter(filename, root, verbose=True):
+def _validate_member(member, root_abs):
+    """
+    Check a single ZIP member name for path-traversal and escape vectors.
+
+    Returns ``None`` if the member is safe, or a human-readable error
+    string if the member must be rejected.  Comparison prefixes are
+    derived from *root_abs* internally via ``os.path.normcase`` so that
+    callers cannot supply inconsistent values.
+
+    Parameters
+    ----------
+    member : str
+        The archive entry name (forward-slash separated, as stored in the ZIP).
+    .. note::
+        This function enforces Zip-Slip and symlink-escape containment only.
+        Cross-package ownership (CVE-2026-12261) is enforced separately by
+        the ``expected_root`` parameter of ``_unzip_iter``.
+
+    root_abs : str
+        Absolute path of the extraction root (used to build candidate paths
+        and derive comparison prefixes via ``os.path.normcase``).
+    """
+    if "\x00" in member:
+        return f"Null byte in entry name blocked: {member!r}"
+
+    abs_prefix = os.path.normcase(root_abs).rstrip(os.sep) + os.sep
+    target_abs = os.path.normcase(os.path.abspath(os.path.join(root_abs, member)))
+    if not target_abs.startswith(abs_prefix):
+        return f"Zip Slip blocked: {member!r}"
+
+    real_prefix = os.path.normcase(os.path.realpath(root_abs)).rstrip(os.sep) + os.sep
+    target_real = os.path.normcase(os.path.realpath(os.path.join(root_abs, member)))
+    if not target_real.startswith(real_prefix):
+        return f"Symlink escape blocked: {member!r}"
+
+    return None
+
+
+def _name_not_as_written(name):
+    """Why a slash-separated *name* would not land on disk as written, or None.
+
+    A component with a trailing dot or space is stored without it on Windows,
+    and a component in a decomposed Unicode spelling is stored composed on a
+    normalising filesystem: each lets one name stand for another, so each is
+    refused on every platform, since an archive extracted anywhere may be
+    carried to such a filesystem (CWE-22, resource poisoning). A component
+    whose stem is a character device name (CON, NUL, COM1 ...) opens the
+    device where such names exist, so it is refused there, by
+    ``pathsec._is_windows_device_name``; on POSIX ``con.xml`` is stored
+    as written, nothing stands for anything else, and refusing it would make
+    a real package (propbank ships ``frames/con.xml``) uninstallable for no
+    gain.
+    """
+    import unicodedata
+
+    from nltk.pathsec import _is_windows_device_name
+
+    for part in name.split("/"):
+        if not part:
+            continue
+        if part != part.rstrip(" ."):
+            return "ends in a dot or a space, which a filesystem strips"
+        if _is_windows_device_name(part):
+            return "is a character device name"
+        if unicodedata.normalize("NFC", part) != part:
+            return "is not in composed (NFC) form, which a filesystem may apply"
+    return None
+
+
+def _member_shape_error(member, root_abs):
+    """Phase 1 refusal of a member that pathsec's extractor would refuse only
+    while writing, after earlier members are already on disk.
+
+    That extractor splits on a backslash on every platform and refuses any
+    ``..`` part, so ``tiny/../other/x`` (which passes the top-level ownership
+    check) and, on POSIX, ``tiny\\..\\x`` are refused here instead, before
+    anything is written; the backslash spelling is also checked for an escape
+    through a symlink (CWE-22 / CWE-59).
+    """
+    spelled = member.replace("\\", "/")
+    if os.pardir in spelled.split("/"):
+        return f"Parent reference blocked: {member!r}"
+    # A name a terminal would act on (control, line-break, bidi or invisible
+    # characters) is refused as an index identifier is (CWE-150): on disk it
+    # would forge listing lines and spoof the name the package declares.
+    try:
+        _refuse_unprintable(member, "archive member name")
+    except ValueError as refused:
+        return str(refused)
+    # A name a target filesystem would change lands under another name (a
+    # trailing dot or space stripped, a device name, a decomposed spelling
+    # composed), so it is refused on every platform, before anything is written.
+    why = _name_not_as_written(spelled)
+    if why is not None:
+        return f"Member name {why}: {sanitize_terminal(repr(member))}"
+    if spelled == member:
+        return None
+    error = _validate_member(spelled, root_abs)
+    if error is None:
+        return None
+    return f"{error} (as the extractor splits {member!r})"
+
+
+def _unzip_iter(
+    filename,
+    root,
+    verbose=True,
+    expected_root=None,
+    expected_size=None,
+    verified=False,
+):
+    """
+    Secure ZIP extraction using validate-then-extract.
+
+    All members are validated before any extraction occurs.  If any member
+    fails validation the entire archive is rejected and nothing is written
+    to disk.
+
+    Checks performed on every member name:
+    - Null-byte rejection (platform path-truncation vector)
+    - Zip-Slip (.., absolute paths, drive letters)
+    - Symlink-escape (writes through pre-existing symlinks)
+
+    ``expected_size`` is the unzipped size the index declares for the
+    package: members declaring more than that plus ``UNZIPPED_SIZE_SLACK``
+    are refused before anything is written, and the bytes actually written
+    are counted against it as well (CWE-400).
+
+    ``verified`` says the caller checked the archive's checksum by name: the
+    members are then read only from a descriptor that no other account could
+    have changed since (owned by this account or root, no group or world
+    write bit, a single name), or nothing is extracted.
+
+    All path comparisons use ``os.path.normcase`` so that the checks
+    are case-insensitive on Windows (no-op on POSIX).
+
+    Members are validated again immediately before each extraction as a
+    best-effort check against filesystem changes between Phase 1 and the
+    actual write, but this cannot eliminate TOCTOU races inherent in
+    non-atomic extraction.
+
+    Extraction aborts on the first error (including I/O errors) rather
+    than skipping individual members.  Partial extraction of a potentially
+    malicious archive is worse than no extraction.
+    """
+
     if verbose:
-        sys.stdout.write("Unzipping %s" % os.path.split(filename)[1])
-        sys.stdout.flush()
+        # the archive name comes from the server index; keep the progress line
+        # unterminated so the trailing status still lands on it
+        safe_print("Unzipping %s" % os.path.split(filename)[1], end="", flush=True)
 
     try:
-        zf = zipfile.ZipFile(filename)
-    except zipfile.error as e:
-        yield ErrorMessage(filename, "Error with downloaded zip file")
-        return
+        zf = ZipFile(filename)
     except Exception as e:
         yield ErrorMessage(filename, e)
+        # Flush the "Unzipping ..." line here because the try/finally that
+        # normally handles this is never entered (zf was never assigned).
+        if verbose:
+            safe_print()
         return
 
-    zf.extractall(root)
+    # The members are read from this descriptor: an archive another account
+    # owns or can write, or a second name for another file, may hold other
+    # bytes than the ones whose checksum the downloader verified.
+    held = os.fstat(zf.fp.fileno()) if verified else None
+    if held is not None and (_not_ours(held) or held.st_nlink > 1):
+        zf.close()
+        yield ErrorMessage(
+            filename,
+            "Refusing to extract an archive that another account owns or can "
+            "write to, or that has a second name: its bytes may not be the "
+            "ones whose checksum was verified",
+        )
+        if verbose:
+            safe_print()
+        return
 
-    if verbose:
-        print()
+    try:
+        root_abs = os.path.abspath(root)
+        members = zf.namelist()
+
+        # Phase 1 -- validate every member before touching the filesystem.
+
+        # Members are extracted one by one below, so names landing on one file
+        # (duplicates, case or normalisation twins, a file that is also a
+        # directory) are refused archive-wide here, before anything is written.
+        try:
+            _reject_colliding_members(members, "downloader.unzip")
+        except ValueError as e:
+            yield ErrorMessage(filename, str(e))
+            return
+        # The ratio policy alone lets a package expand a thousandfold; what
+        # it may put on disk is what the index declared for it.
+        if expected_size is not None:
+            declared_total = sum(zf_info.file_size for zf_info in zf.infolist())
+            if declared_total > expected_size + UNZIPPED_SIZE_SLACK:
+                yield ErrorMessage(
+                    filename,
+                    f"Unzipped size blocked: the archive's members declare "
+                    f"{declared_total} bytes but the index declares "
+                    f"{expected_size} unzipped bytes for this package (CWE-400)",
+                )
+                return
+        has_violations = False
+        for member in members:
+            # --- CVE-2026-12261 fix (cross-package ownership check) ---
+            # Reject any member whose top-level path component differs from
+            # the owning package id.  This blocks cross-package overwrite
+            # without path traversal: a member like
+            #   averaged_perceptron_tagger_eng/file.json
+            # inside a package with id='evil-corpus' is rejected because
+            # 'averaged_perceptron_tagger_eng' != 'evil-corpus'.
+            if expected_root is not None:
+                top = member.replace("\\", "/").lstrip("/").split("/")[0]
+                if top != expected_root:
+                    yield ErrorMessage(
+                        filename,
+                        f"Cross-package overwrite blocked: member {member!r} "
+                        f"is outside the owning package directory {expected_root!r}",
+                    )
+                    has_violations = True
+                    continue
+            # -----------------------------------------------------------
+            error = _validate_member(member, root_abs) or _member_shape_error(
+                member, root_abs
+            )
+            if error is not None:
+                yield ErrorMessage(filename, error)
+                has_violations = True
+                continue
+            # Decompression-bomb check belongs in Phase 1: a bomb member must be
+            # rejected before any (earlier, benign) member is written to disk, so
+            # the validate-then-extract / nothing-is-written contract holds.
+            try:
+                _check_decompression_bomb(zf.getinfo(member))
+            except ValueError as e:
+                yield ErrorMessage(filename, str(e))
+                has_violations = True
+            # So must a member the extractor cannot read (encrypted, or an unknown
+            # compression method): opening it reads its header, not its data.
+            try:
+                zf.open(member).close()
+            except (RuntimeError, NotImplementedError, zipfile.BadZipFile) as e:
+                yield ErrorMessage(filename, f"Unreadable member blocked: {e}")
+                has_violations = True
+
+        if has_violations:
+            return
+
+        # Phase 2 -- all members passed; extract.
+        try:
+            os.makedirs(root_abs, exist_ok=True)
+        except Exception as e:
+            yield ErrorMessage(filename, f"Extraction error: {e}")
+            return
+
+        # Each name once: a duplicate was refused above, and extracting a name
+        # twice would only rewrite the entry that getinfo() resolves it to.
+        extracted = 0
+        for member in dict.fromkeys(members):
+            if expected_root is not None:
+                top = member.replace("\\", "/").lstrip("/").split("/")[0]
+                if top != expected_root:
+                    yield ErrorMessage(
+                        filename,
+                        f"Cross-package overwrite blocked: member {member!r} "
+                        f"is outside the owning package directory {expected_root!r}",
+                    )
+                    return
+            error = _validate_member(member, root_abs) or _member_shape_error(
+                member, root_abs
+            )
+            if error is not None:
+                yield ErrorMessage(filename, f"{error} (during extraction)")
+                return
+            # A pre-existing multiply-linked target would let a stdlib write
+            # alias an outside-root inode (CWE-59); check it under both the
+            # platform spelling and the one the hardened extractor writes.
+            for spelling in dict.fromkeys((member, member.replace("\\", "/"))):
+                target_abs = os.path.normpath(os.path.join(root_abs, spelling))
+                try:
+                    tstat = os.lstat(target_abs)
+                except OSError:
+                    tstat = None
+                if (
+                    tstat is not None
+                    and stat.S_ISREG(tstat.st_mode)
+                    and tstat.st_nlink > 1
+                ):
+                    yield ErrorMessage(
+                        filename,
+                        f"Multiply-linked target blocked: {member!r} "
+                        "(hardlink may alias outside-root inode, CWE-59)",
+                    )
+                    return
+            try:
+                written = zf.extract(member, root_abs)
+            except Exception as e:
+                yield ErrorMessage(filename, f"Extraction error for {member!r}: {e}")
+                return
+            # zipfile stops a member at its declared size, so this only backs
+            # up the declared total above with the bytes really written.
+            if expected_size is not None and not zf.getinfo(member).is_dir():
+                try:
+                    placed = os.lstat(written)
+                except OSError:
+                    placed = None
+                if placed is not None and stat.S_ISREG(placed.st_mode):
+                    extracted += placed.st_size
+                if extracted > expected_size + UNZIPPED_SIZE_SLACK:
+                    if placed is not None and stat.S_ISREG(placed.st_mode):
+                        pathsec.unlink(written, context="Downloader._unzip_iter")
+                    yield ErrorMessage(
+                        filename,
+                        f"Unzipped size blocked: extraction passed the "
+                        f"{expected_size} bytes the index declares (CWE-400)",
+                    )
+                    return
+    except Exception as e:
+        yield ErrorMessage(filename, f"Validation error: {e}")
+    finally:
+        zf.close()
+        if verbose:
+            safe_print()
 
 
 ######################################################################
@@ -2288,6 +3550,11 @@ def build_index(root, base_url):
 
     All identifiers (for both packages and collections) must be unique.
     """
+    # ``root`` is the caller-supplied package tree this index is built from;
+    # authorize that specific directory so its zip/xml reads pass the pathsec
+    # sandbox (CWE-73, GHSA-p4rw follow-up).
+    _authorize_data_dir(root)
+
     # Find all packages.
     packages = []
     for pkg_xml, zf, subdir in _find_packages(os.path.join(root, "packages")):
@@ -2299,6 +3566,7 @@ def build_index(root, base_url):
         pkg_xml.set("unzipped_size", "%s" % unzipped_size)
         pkg_xml.set("size", "%s" % zipstat.st_size)
         pkg_xml.set("checksum", "%s" % md5_hexdigest(zf.filename))
+        pkg_xml.set("sha256_checksum", "%s" % sha256_hexdigest(zf.filename))
         pkg_xml.set("subdir", subdir)
         # pkg_xml.set('svn_revision', _svn_revision(zf.filename))
         if not pkg_xml.get("url"):
@@ -2320,27 +3588,35 @@ def build_index(root, base_url):
     # Put it all together
     top_elt = ElementTree.Element("nltk_data")
     top_elt.append(ElementTree.Element("packages"))
-    for package in packages:
-        top_elt[0].append(package)
+    top_elt[0].extend(sorted(packages, key=lambda package: package.get("id")))
     top_elt.append(ElementTree.Element("collections"))
-    for collection in collections:
-        top_elt[1].append(collection)
+    top_elt[1].extend(sorted(collections, key=lambda collection: collection.get("id")))
 
     _indent_xml(top_elt)
     return top_elt
 
 
-def _indent_xml(xml, prefix=""):
+#: Bound recursion over nested XML so a deeply nested index raises ValueError
+#: instead of an uncaught RecursionError (CWE-674).
+MAX_INDENT_DEPTH = 500
+
+
+def _indent_xml(xml, prefix="", _depth=0):
     """
     Helper for ``build_index()``: Given an XML ``ElementTree``, modify it
     (and its descendents) ``text`` and ``tail`` attributes to generate
     an indented tree, where each nested element is indented by 2
     spaces with respect to its parent.
     """
+    if _depth > MAX_INDENT_DEPTH:
+        raise ValueError(
+            f"XML nesting depth exceeds MAX_INDENT_DEPTH ({MAX_INDENT_DEPTH}); "
+            "the input may be adversarially deep."
+        )
     if len(xml) > 0:
         xml.text = (xml.text or "").strip() + "\n" + prefix + "  "
         for child in xml:
-            _indent_xml(child, prefix + "  ")
+            _indent_xml(child, prefix + "  ", _depth + 1)
         for child in xml[:-1]:
             child.tail = (child.tail or "").strip() + "\n" + prefix + "  "
         xml[-1].tail = (xml[-1].tail or "").strip() + "\n" + prefix
@@ -2361,8 +3637,9 @@ def _check_package(pkg_xml, zipfilename, zf):
     # Zip file must expand to a subdir whose name matches uid.
     if sum((name != uid and not name.startswith(uid + "/")) for name in zf.namelist()):
         raise ValueError(
-            "Zipfile %s.zip does not expand to a single "
-            "subdirectory %s/" % (uid, uid)
+            "Zipfile {}.zip does not expand to a single subdirectory {}/".format(
+                uid, uid
+            )
         )
 
 
@@ -2372,12 +3649,21 @@ def _svn_revision(filename):
     Helper for ``build_index()``: Calculate the subversion revision
     number for a given file (by using ``subprocess`` to run ``svn``).
     """
-    p = subprocess.Popen(
-        ["svn", "status", "-v", filename],
+    from nltk.internals import find_binary_absolute
+    from nltk.pathsec import spawn_trusted
+
+    # a bare "svn" would be found by the OS search (which on Windows begins in
+    # the CWD); resolve it absolute-only and spawn it through the trusted path
+    svn = find_binary_absolute("svn", binary_names=["svn", "svn.exe"])
+    # "--" ends option parsing so a file name starting with "-" cannot become
+    # an svn option (CWE-88)
+    p = spawn_trusted(
+        svn,
+        ["status", "-v", "--", filename],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    (stdout, stderr) = p.communicate()
+    stdout, stderr = p.communicate()
     if p.returncode != 0 or stderr or not stdout:
         raise ValueError(
             "Error determining svn_revision for %s: %s"
@@ -2391,12 +3677,11 @@ def _find_collections(root):
     Helper for ``build_index()``: Yield a list of ElementTree.Element
     objects, each holding the xml for a single package collection.
     """
-    packages = []
-    for dirname, subdirs, files in os.walk(root):
+    for dirname, _subdirs, files in os.walk(root):
         for filename in files:
             if filename.endswith(".xml"):
                 xmlfile = os.path.join(dirname, filename)
-                yield ElementTree.parse(xmlfile).getroot()
+                yield safe_parse(xmlfile).getroot()
 
 
 def _find_packages(root):
@@ -2405,7 +3690,7 @@ def _find_packages(root):
     ``(pkg_xml, zf, subdir)``, where:
       - ``pkg_xml`` is an ``ElementTree.Element`` holding the xml for a
         package
-      - ``zf`` is a ``zipfile.ZipFile`` for the package's contents.
+      - ``zf`` is a ``ZipFile`` for the package's contents.
       - ``subdir`` is the subdirectory (relative to ``root``) where
         the package was found (e.g. 'corpora' or 'grammars').
     """
@@ -2420,11 +3705,11 @@ def _find_packages(root):
                 xmlfilename = os.path.join(dirname, filename)
                 zipfilename = xmlfilename[:-4] + ".zip"
                 try:
-                    zf = zipfile.ZipFile(zipfilename)
+                    zf = ZipFile(zipfilename)
                 except Exception as e:
                     raise ValueError(f"Error reading file {zipfilename!r}!\n{e}") from e
                 try:
-                    pkg_xml = ElementTree.parse(xmlfilename).getroot()
+                    pkg_xml = safe_parse(xmlfilename).getroot()
                 except Exception as e:
                     raise ValueError(f"Error reading file {xmlfilename!r}!\n{e}") from e
 
@@ -2448,6 +3733,19 @@ def _find_packages(root):
                     )
 
                 yield pkg_xml, zf, relpath
+
+            elif filename.endswith(".zip"):
+                # Warn user in case a .xml does not exist for a .zip
+                resourcename = os.path.splitext(filename)[0]
+                xmlfilename = os.path.join(dirname, resourcename + ".xml")
+                if not os.path.exists(xmlfilename):
+                    warnings.warn(
+                        f"{sanitize_terminal(filename)} exists, but "
+                        f"{sanitize_terminal(resourcename) + '.xml'} cannot be found! "
+                        f"This could mean that {sanitize_terminal(resourcename)} can not be downloaded.",
+                        stacklevel=2,
+                    )
+
         # Don't recurse into svn subdirectories:
         try:
             subdirs.remove(".svn")
@@ -2520,8 +3818,29 @@ if __name__ == "__main__":
         default=os.environ.get("NLTK_DOWNLOAD_URL"),
         help="download server index url",
     )
+    parser.add_option(
+        "-x",
+        "--extract",
+        dest="extract",
+        action="store_const",
+        const=True,
+        default=None,
+        help=(
+            "also extract packages the index leaves zipped (wordnet, omw-1.4 ...): "
+            "the archive stays private to the installing account, the extracted "
+            "files are readable by every account and are found before the archive. "
+            "Automatic for an install made as root or outside your home directory"
+        ),
+    )
+    parser.add_option(
+        "--no-extract",
+        dest="extract",
+        action="store_const",
+        const=False,
+        help="never extract a package the index leaves zipped, even as root",
+    )
 
-    (options, args) = parser.parse_args()
+    options, args = parser.parse_args()
 
     downloader = Downloader(server_index_url=options.server_index_url)
 
@@ -2533,8 +3852,9 @@ if __name__ == "__main__":
                 quiet=options.quiet,
                 force=options.force,
                 halt_on_error=options.halt_on_error,
+                extract=options.extract,
             )
-            if rv == False and options.halt_on_error:
+            if not rv and options.halt_on_error:
                 break
     else:
         downloader.download(

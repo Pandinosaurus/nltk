@@ -1,4 +1,338 @@
-Version 3.6.3 2021-08-??
+Version 3.10.5 (unreleased)
+
+* `nltk.data.load()` refuses the pickle packages retired for CVE-2024-39705 (`punkt`, `averaged_perceptron_tagger`, `averaged_perceptron_tagger_ru`, `maxent_ne_chunker`, `maxent_treebank_pos_tagger`) instead of silently handing back their tab replacements: a load that reaches for one of their pickles, under any spelling of the name and in any format, raises `ValueError` before anything is read, naming the replacement to download and the call that loads it (for example `nltk.download('punkt_tab')`, then `nltk.tokenize.PunktTokenizer('english')`) (PR #3955)
+* Support Python 3.15: classifier, docs, tox and the CI matrix (3.15 and 3.15t) (PR #4003)
+
+Version 3.10.4 2026-10-20
+
+This release routes every file path, archive, download, URL fetch and external program through one sandbox that keeps reads and writes inside the trusted data directories, refuses path traversal, symlink escapes and decompression bombs, blocks requests to internal network addresses, and runs Java and other third-party tools only from trusted absolute locations with validated options and input. Pickled models now load through a restricted unpickler, XML and JSON parsing are hardened, and regular expressions, recursion and slow algorithms in the tokenizers, parsers, stemmers and corpus readers are bounded against denial-of-service input. Text that NLTK writes to the terminal, to CSV files, to the WordNet browser and to third-party tool input is sanitized against injection.
+
+Security changes you may notice
+
+Every refusal below raises with a message that starts with "Security Violation" and names the check, so a failure is easy to search for (PR #3877).
+
+* Data directories (nltk.pathsec, nltk.data): corpora, models and every other resource are read and written only inside the directories listed in nltk.data.path. A path that leaves a data root, a symlink that points out of one, and a NUL byte or encoded traversal in a resource name are refused. A data root, or a directory on the way to a resource, that another account can write to is skipped with a warning naming the directory and the remedy. Keep private data in a private directory and add it to nltk.data.path; /tmp is not a data root. Model save and load methods (perceptron, maxent, named-entity chunker, Weka, crf, hunpos, Stanford) accept destinations inside a data root only (PR #3797, #3753, #3850, #3761, #3755, #3759, #3760, #3763, #3806, #3807, #3808, #3809, #3813, #3814, #3815, #3848, #3851, #3852, #3853, #3863, #3871, #3888, #3945, #3961, #3969, #3981)
+* Downloader: downloaded package archives stay private to the installing account (0600). An install another account must read is extracted: a download made as root or outside the installing account's home extracts on its own, and nltk.download(..., extract=True) / python -m nltk.downloader --extract (or --no-extract) decide explicitly. This also unpacks the packages the index leaves zipped (wordnet, omw-1.4 ...); the extracted files are readable by every account and are found before the archive. find() names an archive it cannot read and says how to extract it instead of reporting it "not found". The downloader installs only into directories no other account can write to, treats an archive another account owns or can write to as stale and downloads it afresh, extracts only from an archive no other account could have changed since its checksum was verified, bounds the size of what it fetches, and refuses index entries and archive members that would write outside the package directory (PR #3929, #3804, #3850, #3778)
+* Pickles: nltk.data.load(..., format="pickle") reconstructs plain data only; a pickle that names any class or function is refused. Model loaders that need classes use an explicit allowlist of audited globals, so a gadget such as os.system can never be reconstructed from a model file. chat80 shelve values load the same way (PR #3794, #3754, #3757, #3802, #3817, #3823, #3824)
+* XML, JSON and YAML: nltk.xmlsec refuses any document that declares an entity or references an external one (billion-laughs, external-entity and DTD attacks) and bounds the tree depth, and every corpus XML view, the downloader index, Toolbox and internals parse through it. JSON resources load with a depth and size bound; YAML (the markdown corpus front matter and nltk.data.load(..., format="yaml")) loads through a bounded safe loader. Oversized or too deeply nested input raises ValueError naming the limit (PR #3754, #3805, #3828, #3933, #3972, #3974)
+* Regular expressions (nltk.redos): every regular expression NLTK compiles, including one you pass to RegexpTokenizer, RegexpStemmer, RegexpParser, re_show, TokenSearcher.findall, tgrep, nltk.help tag-set lookups and the concordance and nemo GUIs, now goes through nltk.redos on the regex engine. A pattern longer than 100,000 characters, nested more than 100 deep, with more than 1,000 capturing groups or an excessive repetition product is refused with nltk.redos.error, a subclass of re.error; a match that runs longer than nltk.redos.DEFAULT_TIMEOUT (5 seconds) raises TimeoutError instead of hanging. Patterns keep re syntax; match objects are the regex engine's (PR #3825, #3829, #3830, #3831, #3832, #3833, #3834, #3835, #3836, #3837, #3838, #3839, #3840, #3841, #3842, #3843, #3844, #3845, #3846, #3796, #3801, #3906, #3907, #3908, #3910)
+* Regular expressions made linear: the leading-run and re-anchoring patterns that a timeout cannot catch were rewritten or bounded in the word, Treebank, blankline, TextTiling, toktok and syllable tokenizers, the readline of corpus streams, the CoNLL SRL, TIMIT, senseval, pl196x, NKJP, Alpino, YCOE, IEER, ACE, VerbNet, reviews and Lin readers, relextract, the valuation parser, the CCG lexicon parser, dependency grammars and chomsky_normal_form, each verified on the real corpus (PR #3947, #3934, #3932, #3938, #3935, #3933, #3869, #3944, #3911, #3909, #3953, #3895)
+* Size, depth and time bounds: trees deeper than nltk.tree.MAX_TREE_DEPTH (500), WordNet and other relation walks deeper than nltk.util.MAX_RECURSION_DEPTH (500), tgrep deeper than 50, Toolbox deeper than 500, dependency graphs deeper than 200, are refused with ValueError naming the limit rather than exhausting the stack, and the stemmers, distance metrics, skipgrams, parsers and grammar transforms run in linear or bounded time with identical output for legitimate input. chart_parse stops after nltk.parse.chart.DEFAULT_MAX_TIME (5 seconds of wall-clock, needed only for feature grammars; max_time=None disables it). Tree.__repr__ no longer recurses, so a deep accepted tree prints (PR #3827, #3885, #3895, #3767, #3784, #3917, #3958, #3960, #3977)
+* External tools and Java: a tool binary is resolved from an absolute path or a trusted search path only, never from the current directory; the binary, its directory and the model and data files handed to it must not be writable by another account (symlinked and multi-call executables such as a packaged Graphviz dot are supported). java() accepts a main class as the first argument only (no -jar, @argfile or .java source file), validates its options against an allowlist, and loads jars only from a data root unless NLTK_ALLOW_UNSAFE_JARS=1 opts out with a warning. CoreNLP server options are allowlisted. Stanford, Malt, Senna, hunpos, Prover9, megam, TADM, Weka and crf wrappers validate their paths and the text they pipe to the tool against line and argument injection (PR #3772, #3771, #3975, #3743, #3782, #3788, #3768, #3798, #3887, #3858, #3950, #3951, #3812, #3816, #3868, #3894, #3941, #3850, #3925)
+* Network: the downloader, nltk.data.load of a URL and the CHILDES reader fetch through pathsec.urlopen, which refuses addresses that are not globally routable (loopback, private, link-local and multicast, including tunnelled and obfuscated forms), pins the validated address for the connection, allows file:// with a local authority only, and refuses a proxied fetch unless NLTK_ALLOW_PROXIED_URLOPEN=1 (or nltk.pathsec.ALLOW_PROXIED_FETCH = True) asserts the proxy is trusted. The CoreNLP client talks to its local server with requests and is not affected (PR #3847, #3810, #3750, #3850)
+* Terminal, CSV, DOT and HTML output: every print in the library goes through nltk.termsec.safe_print, which renders control characters, escape sequences and unbalanced bidi overrides from corpus text as visible \xNN escapes instead of letting them reach the terminal. The CSV files the twitter and sentiment helpers write neutralise formula-leading and control-sequence cells, AlignedSent DOT labels are escaped, the WordNet browser escapes corpus text, and nltk.data.load's verbose output no longer prints the full resource URL (PR #3914, #3915, #3937, #3946, #3931, #3930, #3856, #3902)
+* Corpus stores and encodings: the PanLex Lite and chat80 sqlite stores open read-only on a pinned descriptor with their schema screened and a statement step budget, chat80 shelves are read by a key manifest, Toolbox SFM markers are sanitised, and a resource encoding that is not a text codec (bz2_codec and friends) is refused (PR #3961, #3964, #3959, #3888, #3800, #3962)
+* Package contents: the wheel no longer ships nltk.test.unit (the attack harnesses, advisory probes and their fixtures), so pip install nltk is about half the size and import nltk.test.unit works from a source checkout or the sdist only. The doctests under nltk.test still ship (PR #3954)
+
+Security test and CI infrastructure
+
+* Attack and regression harnesses, advisory probes, the sandbox conftest fixtures, the pre-commit guards (no unsandboxed open, every regex through redos, every pickle through picklesec, every print through safe_print), load-invariant CPU-time timing rules, CI matrix and runner fixes, pinned third-party downloads, and the AUTHORS update (PR #3744, #3749, #3762, #3764, #3770, #3776, #3791, #3795, #3803, #3818, #3820, #3821, #3822, #3849, #3855, #3860, #3861, #3862, #3864, #3865, #3866, #3876, #3884, #3899, #3904, #3905, #3912, #3917, #3924, #3926, #3927, #3939, #3940, #3943, #3948, #3949, #3963, #3968, #3971, #3976, #3982, #3983, #3984, #3985)
+
+Other changes
+
+* Added RTL language syntactic tree visualization support (PR #3472)
+* Fix #3394: Ensure punkt_tab is downloaded when punkt is requested (PR #3505)
+* Show README.md as the PyPI long description (PR #3746)
+* Add stopwords.words("english-extended") (PR #3747)
+* Krippendorff's alpha: treat placeholder labels as missing data (#2865, #2732) (PR #3752)
+* Fix shared defaults in chat80 Concept (PR #3773)
+* Fix Java wrappers decoding str output from java() (universal_newlines) (PR #3777)
+* Prevent IndexError in Hungarian stemmer on empty string (PR #3785)
+* Isolate MTE tag filters per view (PR #3792)
+* Fix newline in ellipsis tokens in TweetTokenizer (PR #3819)
+* Isolate default WordNet reference relations (PR #3872)
+* Fix resolution paths that cancel distinct literals (PR #3878)
+* Fix UTF-8 text preprocessing in NKJP corpus reader (PR #3879)
+* Remove shadowed FeatStruct._walk stub and preserve its docstring (PR #3893)
+* Count all increasing pairs in RIBES kendall_tau (PR #3900)
+* Fix the TweetTokenizer ZWJ emoji pattern capturing adjacent whitespace (PR #3913)
+* Surface the CoreNLP server's reason for a non-2xx answer (PR #3942)
+* Omit unaligned (NULL target) pairs from Alignment strings, so IBM model output prints (PR #3967)
+* Fix DependencyGraph cycle detection, which returned False on every parsed graph (PR #3978)
+* Show, range and draw an alignment with an unaligned pair on every surface (PR #3987)
+
+Thanks to the following contributors to 3.10.4: Zhewen Tan, Yanhaoxi, Yazan Balawneh (Cystack.ps),
+Abdulmoyn Sommakieh, Golitsin Vyacheslav, Mingzhe Yu, 宁岑, Tai An, 区梓灏, Tom Aarsen, Raffi Enficiaud,
+JJ, Artemiy, Cherno.x, 0xEaS, sarvesh patil, Isaac David, Arthur Gervais, leduckhuong, Ibrahim zain,
+Athul Jayaram, Chiencp, Ziyu Lin, Michael Lip, GOLDBERG8, Litesh Ghute, Kartik G, Thai Son Dinh,
+infy, 0xRenSec, Joshgun Abdullayev, Arpit Jain, Mohammad Favas S, Jace, nguyencanhthuong,
+kokomaru167, jankesec, Daniel Coles, Fodhil Benhiba, Ubaid Ur Rehman, Maciej Zmitrukiewicz,
+Gecko Security, Bugbunny, Liling Tan, Huanyi Xie, ahcrm-core, Eric Kafe, Steven Bird.
+
+Version 3.10.3 2026-08-12
+
+* docs: wrap Chat-80 HOWTO output
+* Sandbox Stanford JAR execution to nltk_data directories
+* Harden path-traversal / file-I/O sandbox: close write-side symlink TOCTOU + shared-temp squat, lock the cluster with a living audit (CWE-22/59/377)
+* Extend algorithmic-complexity DoS hardening: repo-wide sweep + two-string distances (CWE-407/CWE-400)
+* Bound unbounded-work DoS in parsers and grammar transforms (CWE-407/674/835)
+* fix(security): sandbox MaltParser's Java execution (CVE-2026-12252, CVE-2026-12841)
+* fix(security): trust the system temp dir only when it is private (CWE-377/CWE-378)
+* fix(security): validate corpus-reader roots against the data sandbox (CWE-73)
+* fix(security): validate per-call java() options and replace the -XX:/-D allowlist with a minimal one (CWE-88)
+* Additional security hardening (CWE-407, CWE-426, CWE-427, CWE-502, CWE-59, CWE-776, CWE-918)
+
+Thanks to the following contributors to 3.10.3: Mohammad Favas S, leduckhuong, Ziyu Lin, dougtrainer28-cmyk, Chaitanya Kadian, 0xRenSec, Arpit Jain, Jace, nguyencanhthuong, Liling Tan, medimedi, Eric Kafe.
+
+Version 3.10.2 2026-08-05
+
+* Remove inisec.py and document PYTHONSAFEPATH instead
+* Skip draft step in release workflow
+* Fix symlink escape in FramenetCorpusReader (CWE-59)
+* Guard tempfile.gettempdir() when building pathsec allowed roots
+* add tests for transitive_closure
+
+Thanks to the following contributors to 3.10.2:
+Litesh Ghute, Eric Kafe, Evan Kiefer, tarann26 and Rav Singh Chandan
+
+Version 3.10.1 2026-07-29
+
+* Expand `~` in env-var paths
+* Validate types after WordNet app pickle deserialization
+* Fix uncontrolled search path in HunposTagger
+* Use exact thirds in `masi_distance`
+* Avoid retaining bllip import exceptions
+* Fix `word_tokenize`: pad opening single quote before multi-letter words.
+* Implement `Tree.pformat_latex_forest`.
+* Prevent module hijacking in inline imports.
+* Fix ReDoS in TweetTokenizer URL and email regexes.
+
+Thanks to the following contributors to 3.10.1:
+Abhinav, Litesh Ghute, Eric Kafe, Eryk Kaźmierczak, Selim C.,
+Muhtasim Munif Fahim, Triniti K., and Tom Y. Mitich.
+
+Version 3.10.0 2026-06-11
+
+* Enforce the stricter `nltk.pathsec` security policy by default
+* Document the new security model and migration guidance
+* Harden resource loading against path traversal and SSRF/DNS-rebinding
+* Harden downloader path handling and block XML entity expansion
+* Close remaining corpus-reader security edge cases
+* Replace unsafe `exec()` usage in the utility CLI
+* Warn on unpickling user-provided pickles
+* Add HuggingFace datasets integration (`nltk.huggingface`)
+* Align TnT with Brants (2000) specifications
+* Fix PorterStemmer irregular-form lowercasing in NLTK mode
+* Fix TransitionParser sparse index dtype for scikit-learn 1.9
+* Fix TextCat tie handling
+* Fix WordNet object comparisons for incompatible types
+* Cache WordNet max depth lazily for `lch_similarity()`
+* Fix CCG variable direction, substitution, and type-raising bugs
+* Fix Jaro similarity for single-character and empty-string cases
+* Improve CI and release-maintenance workflows
+
+Thanks to the following contributors to 3.10.0:
+13rac1, alvations, bowiechen, devesh-2002, ekaf, elias-ba,
+haosenwang1018, HyperPS, ihitamandal, jancallewaert, jhnwnstd,
+JuanIMartinezB, Lemm1, LinZiyuu, Mr-Neutr0n, PastelStorm,
+scruge1, Syzygy2048, ylwango613, yzhaoinuw
+
+Version 3.9.4 2026-03-24
+
+* Support Python 3.14
+* Fix bug in Levenshtein distance when substitution_cost > 2
+* Fix bug in Treebank detokeniser re quote ordering
+* Fix bug in Jaro similarity for empty strings
+* Several security enhancements
+* Fix GHSA-rf74-v2fm-23pw: unbounded recursion in JSONTaggedDecoder
+* Implement TextTiling vocabulary introduction method (Hearst 1997)
+* Fix ALINE feature matrix errors and add comprehensive tests
+* Support multiple VerbNet versions, fix longid/shortid regex for VerbNet ids
+* Let downloader fallback to md5 when sha256 is unavailable
+* Several other minor bugfixes and code cleanups
+
+Thanks to the following contributors to 3.9.4:
+Min-Yen Kan, Eric Kafe, Emily Voss, bowiechen, Hrudhai01,
+jancallewaert, Mr-Neutr0n, pollak.peter89, ylwango613,
+
+Version 3.9.3 2026-02-21
+
+* Fix CVE-2025-14009: secure ZIP extraction in nltk.downloader (#3468)
+* Block path traversal/arbitrary reads in nltk.data for protocol-less refs (#3467)
+* Block path traversal/abs paths in corpus readers and FS pointers (#3479, #3480)
+* Validate external StanfordSegmenter JARs using SHA256 (#3477)
+* Add optional sandbox enforcement for filestring() (#3485)
+* Maintenance: downloader/zipped models, CI/tooling updates
+
+Thanks to the following contributors to 3.9.3:
+Chris Clauss, Eric Kafe, HyperPS, purificant, Shivansh-Game, Christopher Smith
+
+Version 3.9.2 2025-10-01
+
+* Update download checksums to use SHA256 in built index
+* Fix percentage escape in new-style string formatting
+* replace shortened URLs using goo.gl
+* Make Wordnet interoperable with various taggers and tagged corpora
+* Fix saving PerceptronTagger
+* Document how to reproduce old Wordnet studies
+* properly initialize Portuguese corpus reader
+* support for mixed rules conversion into Chomsky Normal Form
+* only import tkinter if a GUI is needed
+* issue #2112 with Corenlp
+* new environment variable NLTK_DOWNLOADER_FORCE_INTERACTIVE_SHELL
+* Lesk defaults to most frequent sense in case of ties
+
+Thanks to the following contributors to 3.9.2:
+Jose Cols, Peter de Blanc, GeneralPoxter, Eric Kafe, William LaCroix, Jason Liu,
+Samer Masterson, Mike014, purificant, Andrew Ernest Ritz, samertm, Ikram Ul Haq,
+Christopher Smith, Ryan Mannion
+
+Version 3.9.1 2024-08-19
+* Fixed bug that prevented wordnet from loading
+
+Version 3.9 2024-08-18
+* Fix security vulnerability CVE-2024-39705 (breaking change)
+* Replace pickled models (punkt, chunker, taggers) by new pickle-free "_tab" packages
+* No longer sort Wordnet synsets and relations (sort in calling function when required)
+* Only strip the last suffix in Wordnet Morphy, thus restricting synsets() results
+* Add Python 3.12 support
+* Many other minor fixes
+
+Thanks to the following contributors to 3.8.2:
+Tom Aarsen, Cat Lee Ball, Veralara Bernhard, Carlos Brandt, Konstantin Chernyshev, Michael Higgins,
+Eric Kafe, Vivek Kalyan, David Lukes, Rob Malouf, purificant, Alex Rudnick, Liling Tan, Akihiro Yamazaki.
+
+Version 3.8.1 2023-01-02
+
+* Resolve RCE vulnerability in localhost WordNet Browser (#3100)
+* Remove unused tool scripts (#3099)
+* Resolve XSS vulnerability in localhost WordNet Browser (#3096)
+* Add Python 3.11 support (#3090)
+
+Thanks to the following contributors to 3.8.1:
+Francis Bond, John Vandenberg, Tom Aarsen
+
+Version 3.8 2022-12-12
+
+* Refactor dispersion plot (#3082)
+* Provide type hints for LazyCorpusLoader variables (#3081)
+* Throw warning when LanguageModel is initialized with incorrect vocabulary (#3080)
+* Fix WordNet's all_synsets() function (#3078)
+* Resolve TreebankWordDetokenizer inconsistency with end-of-string contractions (#3070)
+* Support both iso639-3 codes and BCP-47 language tags (#3060)
+* Avoid DeprecationWarning in Regexp tokenizer (#3055)
+* Fix many doctests, add doctests to CI (#3054, #3050, #3048)
+* Fix bool field not being read in VerbNet (#3044)
+* Greatly improve time efficiency of SyllableTokenizer when tokenizing numbers (#3042)
+* Fix encodings of Polish udhr corpus reader (#3038)
+* Allow TweetTokenizer to tokenize emoji flag sequences (#3034)
+* Prevent LazyModule from increasing the size of nltk.__dict__ (#3033)
+* Fix CoreNLPServer non-default port issue (#3031)
+* Add "acion" suffix to the Spanish SnowballStemmer (#3030)
+* Allow loading WordNet without OMW (#3026)
+* Use input() in nltk.chat.chatbot() for Jupyter support (#3022)
+* Fix edit_distance_align() in distance.py (#3017)
+* Tackle performance and accuracy regression of sentence tokenizer since NLTK 3.6.6 (#3014)
+* Add the Iota operator to semantic logic (#3010)
+* Resolve critical errors in WordNet app (#3008)
+* Resolve critical error in CHILDES Corpus (#2998)
+* Make WordNet information_content() accept adjective satellites (#2995)
+* Add "strict=True" parameter to CoreNLP (#2993, #3043)
+* Resolve issue with WordNet's synset_from_sense_key (#2988)
+* Handle WordNet synsets that were lost in mapping (#2985)
+* Resolve TypeError in Boxer (#2979)
+* Add function to retrieve WordNet synonyms (#2978)
+* Warn about nonexistent OMW offsets instead of raising an error (#2974)
+* Fix missing ic argument in res, jcn and lin similarity functions of WordNet (#2970)
+* Add support for the extended OMW (#2946)
+* Fix LC cutoff policy of text tiling (#2936)
+* Optimize ConditionalFreqDist.__add__ performance (#2939)
+* Add Markdown corpus reader (#2902)
+
+Thanks to the following contributors to 3.8:
+Alexandre Perez-Lebel, David Lukes, Eric Kafe, Fernando Carranza, Heungson Lee,
+Hoyeol Kim, James Huang, Jelle Zijlstra, Louis-Justin Tallot, M.K. Pawelkiewicz,
+Jan Lennartz, Malinda Dilhara, Martin Kondratzky, Rob Malouf, Saud Kadiri,
+Siddhesh Mhadnak, Stephan Hasler, Steve Smith, Tom Aarsen, Tyler Sheaffer,
+Yue Zhao, cestwc, elespike, purificant, richardyy1188
+
+Version 3.7 2022-02-09
+
+* Improve and update the NLTK team page on nltk.org (#2855, #2941)
+* Drop support for Python 3.6, support Python 3.10 (#2920)
+
+Thanks to the following contributors to 3.7:
+Tom Aarsen
+
+Version 3.6.7 2021-12-28
+
+* Resolve IndexError in `sent_tokenize` and `word_tokenize` (#2922)
+
+Thanks to the following contributors to 3.6.7:
+Tom Aarsen
+
+Version 3.6.6 2021-12-21
+
+* Refactor `gensim.doctest` to work for gensim 4.0.0 and up (#2914)
+* Add Precision, Recall, F-measure, Confusion Matrix to Taggers (#2862)
+* Added warnings if .zip files exist without any corresponding .csv files. (#2908)
+* Fix `FileNotFoundError` when the `download_dir` is a non-existing nested folder (#2910)
+* Rename omw to omw-1.4 (#2907)
+* Resolve ReDoS opportunity by fixing incorrectly specified regex (#2906)
+* Support OMW 1.4 (#2899)
+* Deprecate Tree get and set node methods (#2900)
+* Fix broken inaugural test case (#2903)
+* Use Multilingual Wordnet Data from OMW with newer Wordnet versions (#2889)
+* Keep NLTKs "tokenize" module working with pathlib (#2896)
+* Make prettyprinter to be more readable (#2893)
+* Update links to the nltk book (#2895)
+* Add `CITATION.cff` to nltk (#2880)
+* Resolve serious ReDoS in PunktSentenceTokenizer (#2869)
+* Delete old CI config files (#2881)
+* Improve Tokenize documentation + add TokenizerI as superclass for TweetTokenizer (#2878)
+* Fix expected value for BLEU score doctest after changes from #2572
+* Add multi Bleu functionality and tests (#2793)
+* Deprecate 'return_str' parameter in NLTKWordTokenizer and TreebankWordTokenizer (#2883)
+* Allow empty string in CFG's + more (#2888)
+* Partition `tree.py` module into `tree` package + pickle fix (#2863)
+* Fix several TreebankWordTokenizer and NLTKWordTokenizer bugs (#2877)
+* Rewind Wordnet data file after each lookup (#2868)
+* Correct __init__ call for SyntaxCorpusReader subclasses (#2872)
+* Documentation fixes (#2873)
+* Fix levenstein distance for duplicated letters (#2849)
+* Support alternative Wordnet versions (#2860)
+* Remove hundreds of formatting warnings for nltk.org (#2859)
+* Modernize `nltk.org/howto` pages (#2856)
+* Fix Bleu Score smoothing function from taking log(0) (#2839)
+* Update third party tools to newer versions and removing MaltParser fixed version (#2832)
+* Fix TypeError: _pretty() takes 1 positional argument but 2 were given in sem/drt.py (#2854)
+* Replace `http` with `https` in most URLs (#2852)
+
+Thanks to the following contributors to 3.6.6:
+Adam Hawley, BatMrE, Danny Sepler, Eric Kafe, Gavish Poddar, Panagiotis Simakis,
+RnDevelover, Robby Horvath, Tom Aarsen, Yuta Nakamura, Mohaned Mashaly
+
+Version 3.6.5 2021-10-11
+
+* modernised nltk.org website
+* addressed LGTM.com issues
+* support ZWJ sequences emoji and skin tone modifer emoji in TweetTokenizer
+* METEOR evaluation now requires pre-tokenized input
+* Code linting and type hinting
+* implement get_refs function for DrtLambdaExpression
+* Enable automated CoreNLP, Senna, Prover9/Mace4, Megam, MaltParser CI tests
+* specify minimum regex version that supports regex.Pattern
+* avoid re.Pattern and regex.Pattern which fail for Python 3.6, 3.7
+
+Thanks to the following contributors to 3.6.5:
+Tom Aarsen, Saibo Geng, Mohaned Mashaly, Dimitri Papadopoulos, Danny Sepler,
+Ahmet Yildirim, RnDevelover, yutanakamura
+
+Version 3.6.4 2021-10-01
+
+* deprecate `nltk.usage(obj)` in favor of `help(obj)`
+* resolve ReDoS vulnerability in Corpus Reader
+* solidify performance tests
+* improve phone number recognition in tweet tokenizer
+* refactored CISTEM stemmer for German
+* identify NLTK Team as the author
+* replace travis badge with github actions badge
+* add SECURITY.md
+
+Thanks to the following contributors to 3.6.4:
+Tom Aarsen, Mohaned Mashaly, Dimitri Papadopoulos Orfanos, purificant, Danny Sepler
+
+Version 3.6.3 2021-09-19
 * Dropped support for Python 3.5
 * Run CI tests on Windows, too
 * Moved from Travis CI to GitHub Actions
@@ -14,11 +348,12 @@ Version 3.6.3 2021-08-??
 * Fix bug in nltk.metrics.aline, C_skip = -10
 * Improvements to TweetTokenizer
 * Optional show arg for FreqDist.plot, ConditionalFreqDist.plot
+* edit_distance now computes Damerau-Levenshtein edit-distance
 
-Thanks to the following contributors to 3.6.3
-Tom Aarsen, Michael Wayne Goodman, Michał Górny, Maarten ter Huurne, Manu Joseph,
-Eric Kafe, Ilia Kurenkov, Daniel Loney, Rob Malouf, purificant, Danny Sepler,
-Anthony Sottile
+Thanks to the following contributors to 3.6.3:
+Tom Aarsen, Abhijnan Bajpai, Michael Wayne Goodman, Michał Górny, Maarten ter Huurne,
+Manu Joseph, Eric Kafe, Ilia Kurenkov, Daniel Loney, Rob Malouf, Mohaned Mashaly,
+purificant, Danny Sepler, Anthony Sottile
 
 Version 3.6.2 2021-04-20
 * move test code to nltk/test
@@ -26,7 +361,7 @@ Version 3.6.2 2021-04-20
 * fix bug in NgramAssocMeasures (order preserving fix)
 * fixes for compatibility with Pypy 7.3.4
 
-Thanks to the following contributors to 3.6.2
+Thanks to the following contributors to 3.6.2:
 Ruben Cartuyvels, Rob Malouf, Dalton Pearson, Danny Sepler
 
 Version 3.6 2021-04-07
@@ -43,7 +378,7 @@ Version 3.6 2021-04-07
 
 Thanks to the following contributors to 3.6:
 Tom Aarsen, K Abainia, Akshita Bhagia, Andrew Bird, Thomas Bird,
-Tom Conroy, CubieDev, Christopher Hench, Andrew Jorgensen, Eric Kafe,
+Tom Conroy, Christopher Hench, Andrew Jorgensen, Eric Kafe,
 Ilia Kurenkov, Yeting Li, Joseph Manu, Marius Mather, Denali Molitor,
 Jacob Moorman, Philippe Ombredanne, Vassilis Palassopoulos, Ram Rachum,
 Danny Sepler, Or Sharir, Brad Solomon, Hiroki Teranishi, Constantin Weisser,
@@ -208,7 +543,7 @@ Version 3.2.2 2016-12-31
 * rewrite Porter Stemmer
 * rewrite FrameNet corpus reader
   (adds frame parameter to fes(), lus(), exemplars()
-  see http://nltk.org/howto/framenet.html)
+  see https://www.nltk.org/howto/framenet.html)
 * updated FrameNet Corpus to version 1.7
 * fixes to stanford_segmenter.py, SentiText, CoNLL Corpus Reader
 * fixes to BLEU, naivebayes, Krippendorff's alpha, Punkt
@@ -478,9 +813,9 @@ Morten Neergaard, Nathan Schneider, Rico Sennrich.
 
 Version 2.0.1 2012-05-15
 
-* moved NLTK to GitHub: http://github.com/nltk
+* moved NLTK to GitHub: https://github.com/nltk
 * set up integration testing: https://jenkins.shiningpanda.com/nltk/ (Morten Neergaard)
-* converted documentation to Sphinx format: http://nltk.github.com/api/nltk.html
+* converted documentation to Sphinx format: https://www.nltk.org/api/nltk.html
 * dozens of minor enhancements and bugfixes: https://github.com/nltk/nltk/commits/
 * dozens of fixes for conformance with PEP-8
 * dozens of fixes to ensure operation with Python 2.5
@@ -611,7 +946,7 @@ NLTK-Contrib:
 
 Book:
 * updates for second printing, correcting errata
-  http://nltk.googlecode.com/svn/trunk/nltk/doc/book/errata.txt
+  https://nltk.googlecode.com/svn/trunk/nltk/doc/book/errata.txt
 
 Data:
 * added Europarl sample, with 10 docs for each of 11 langs (Nitin Madnani)
@@ -754,7 +1089,7 @@ NLTK:
 Data:
 * Corrected identifiers in Dependency Treebank corpus
 * Basque and Catalan Dependency Treebanks (CoNLL 2007)
-* PE08 Parser Evalution data
+* PE08 Parser Evaluation data
 * New models for POS tagger and named-entity tagger
 
 Book:
@@ -824,7 +1159,7 @@ Data:
 * Added movie script "Monty Python and the Holy Grail" to webtext corpus
 * Replaced words corpus data with a much larger list of English words
 * New URL for list of available NLTK corpora
-  http://nltk.googlecode.com/svn/trunk/nltk_data/index.xml
+  https://nltk.googlecode.com/svn/trunk/nltk_data/index.xml
 
 Book:
 * complete rewrite of first three chapters to make the book accessible
@@ -1067,7 +1402,7 @@ Code:
 - changed corpus.util to use the 'rb' flag for opening files, to fix problems
   reading corpora under MSWindows
 - updated stale examples in engineering.txt
-- extended feature stucture interface to permit chained features, e.g. fs['F','G']
+- extended feature structure interface to permit chained features, e.g. fs['F','G']
 - further misc improvements to test code plus some bugfixes
 Tutorials:
 - rewritten opening section of tagging chapter

@@ -2,7 +2,7 @@
 #
 # Copyright (C) 2001-2015 NLTK Project
 # Author: Selina Dennis <selina@tranzfusion.net>
-# URL: <http://nltk.org/>
+# URL: <https://www.nltk.org/>
 # For license information, see LICENSE.TXT
 
 """
@@ -14,16 +14,17 @@ with NLTK.
 
 The YCOE corpus is divided into 100 files, each representing
 an Old English prose text. Tags used within each text complies
-to the YCOE standard: http://www-users.york.ac.uk/~lang22/YCOE/YcoeHome.htm
+to the YCOE standard: https://www-users.york.ac.uk/~lang22/YCOE/YcoeHome.htm
 """
 
 import os
-import re
 
+from nltk import redos
 from nltk.corpus.reader.api import *
 from nltk.corpus.reader.bracket_parse import BracketParseCorpusReader
 from nltk.corpus.reader.tagged import TaggedCorpusReader
 from nltk.corpus.reader.util import *
+from nltk.pathsec import validate_path
 from nltk.tokenize import RegexpTokenizer
 
 
@@ -37,6 +38,16 @@ class YCOECorpusReader(CorpusReader):
     def __init__(self, root, encoding="utf8"):
         CorpusReader.__init__(self, root, [], encoding)
 
+        # A psd/pos directory symlink escapes the corpus root: join() does a
+        # string-prefix check only, not symlink resolution, so files outside the
+        # YCOE corpus would be enumerated and read (CWE-59).
+        for sub in ("psd", "pos"):
+            validate_path(
+                self.root.join(sub),
+                context="YCOECorpusReader",
+                required_root=self.root,
+            )
+
         self._psd_reader = YCOEParseCorpusReader(
             self.root.join("psd"), ".*", ".psd", encoding=encoding
         )
@@ -45,7 +56,7 @@ class YCOECorpusReader(CorpusReader):
         # Make sure we have a consistent set of items:
         documents = {f[:-4] for f in self._psd_reader.fileids()}
         if {f[:-4] for f in self._pos_reader.fileids()} != documents:
-            raise ValueError('Items in "psd" and "pos" ' "subdirectories do not match.")
+            raise ValueError('Items in "psd" and "pos" subdirectories do not match.')
 
         fileids = sorted(
             ["%s.psd" % doc for doc in documents]
@@ -136,8 +147,11 @@ class YCOEParseCorpusReader(BracketParseCorpusReader):
     that strips out (CODE ...) and (ID ...) nodes."""
 
     def _parse(self, t):
-        t = re.sub(r"(?u)\((CODE|ID)[^\)]*\)", "", t)
-        if re.match(r"\s*\(\s*\)\s*$", t):
+        # Bound the node body and keep `(` out of it: `(CODE`*N with no `)` was
+        # O(n**2) re-anchoring (CWE-407; see PR #3896), and excluding the anchor
+        # stops each scan at the next node. Real (CODE ...)/(ID ...) tags are short.
+        t = redos.sub(r"(?u)\((CODE|ID)[^()]{0,400}\)", "", t)
+        if redos.match(r"\s*\(\s*\)\s*$", t):
             return None
         return BracketParseCorpusReader._parse(self, t)
 

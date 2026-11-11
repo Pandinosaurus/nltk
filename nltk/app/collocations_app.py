@@ -1,8 +1,8 @@
 # Natural Language Toolkit: Collocations Application
 # Much of the GUI code is imported from concordance.py; We intend to merge these tools together
-# Copyright (C) 2001-2021 NLTK Project
+# Copyright (C) 2001-2026 NLTK Project
 # Author: Sumukh Ghodke <sghodke@csse.unimelb.edu.au>
-# URL: <http://nltk.org/>
+# URL: <https://www.nltk.org/>
 # For license information, see LICENSE.TXT
 #
 
@@ -40,6 +40,7 @@ from nltk.corpus import (
     treebank,
 )
 from nltk.probability import FreqDist
+from nltk.termsec import safe_print
 from nltk.util import in_idle
 
 CORPUS_LOADED_EVENT = "<<CL_EVENT>>"
@@ -124,7 +125,7 @@ class CollocationsView:
             self.var,
             self.model.DEFAULT_CORPUS,
             command=self.corpus_selected,
-            *self.model.non_default_corpora()
+            *self.model.non_default_corpora(),
         )
         om["borderwidth"] = 0
         om["highlightthickness"] = 1
@@ -419,7 +420,7 @@ class CollocationsModel:
                 self.model.collocations = list(map(itemgetter(0), scored))
                 self.model.queue.put(CORPUS_LOADED_EVENT)
             except Exception as e:
-                print(e)
+                safe_print(e)
                 self.model.queue.put(ERROR_LOADING_CORPUS_EVENT)
 
 

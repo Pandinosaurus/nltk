@@ -1,19 +1,20 @@
 # Natural Language Toolkit: Language Model Unit Tests
 #
-# Copyright (C) 2001-2021 NLTK Project
+# Copyright (C) 2001-2026 NLTK Project
 # Author: Ilia Kurenkov <ilia.kurenkov@gmail.com>
 #         Manu Joseph <manujosephv@gmail.com>
-# URL: <http://nltk.org/>
+# URL: <https://www.nltk.org/>
 # For license information, see LICENSE.TXT
 """Smoothing algorithms for language modeling.
 
 According to Chen & Goodman 1995 these should work with both Backoff and
 Interpolation.
 """
+
 from operator import methodcaller
 
-from nltk import ConditionalFreqDist
 from nltk.lm.api import Smoothing
+from nltk.probability import ConditionalFreqDist
 
 
 def _count_values_gt_zero(distribution):

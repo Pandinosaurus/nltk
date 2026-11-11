@@ -1,8 +1,8 @@
 # Natural Language Toolkit: PanLex Corpus Reader
 #
-# Copyright (C) 2001-2021 NLTK Project
+# Copyright (C) 2001-2026 NLTK Project
 # Author: David Kamholz <kamholz@panlex.org>
-# URL: <http://nltk.org/>
+# URL: <https://www.nltk.org/>
 # For license information, see LICENSE.TXT
 
 """
@@ -11,10 +11,9 @@ as an SQLite database. See the README.txt in the panlex_lite corpus directory
 for more information on PanLex Lite.
 """
 
-import os
-import sqlite3
-
+from nltk import pathsec
 from nltk.corpus.reader.api import CorpusReader
+from nltk.data import FileSystemPathPointer
 
 
 class PanLexLiteCorpusReader(CorpusReader):
@@ -43,7 +42,18 @@ class PanLexLiteCorpusReader(CorpusReader):
     """
 
     def __init__(self, root):
-        self._c = sqlite3.connect(os.path.join(root, "db.sqlite")).cursor()
+        # The corpus reader validates the root against the data sandbox
+        # (GHSA-3gq4-3j92-5w49) and gives fileids() and root like any reader.
+        CorpusReader.__init__(self, root, ["db.sqlite"])
+        if not isinstance(self._root, FileSystemPathPointer):
+            raise ValueError("PanLex Lite is an SQLite database and must be on disk")
+        # pathsec keeps db.sqlite inside the root (a link out is refused,
+        # CWE-59), pins it and its sidecars and opens it read only (CWE-367).
+        self._c = pathsec.connect_sqlite_read_only(
+            str(self.abspath("db.sqlite")),
+            context="PanLexLiteCorpusReader",
+            required_root=str(self._root),
+        ).cursor()
 
         self._uid_lv = {}
         self._lv_uid = {}
@@ -90,7 +100,7 @@ class PanLexLiteCorpusReader(CorpusReader):
             mn = i[0]
             uid = self._lv_uid[i[5]]
 
-            if not mn in mn_info:
+            if mn not in mn_info:
                 mn_info[mn] = {
                     "uq": i[1],
                     "ap": i[2],
@@ -98,7 +108,7 @@ class PanLexLiteCorpusReader(CorpusReader):
                     "ex": {expr_uid: [expr_tt]},
                 }
 
-            if not uid in mn_info[mn]["ex"]:
+            if uid not in mn_info[mn]["ex"]:
                 mn_info[mn]["ex"][uid] = []
 
             mn_info[mn]["ex"][uid].append(i[4])
@@ -108,14 +118,14 @@ class PanLexLiteCorpusReader(CorpusReader):
     def translations(self, from_uid, from_tt, to_uid):
         """
         Return a list of translations for an expression into a single language
-            variety.
+        variety.
 
         :param from_uid: the source expression's language variety, as a
             seven-character uniform identifier.
         :param from_tt: the source expression's text.
         :param to_uid: the target language variety, as a seven-character
             uniform identifier.
-        :return a list of translation tuples. The first element is the expression
+        :return: a list of translation tuples. The first element is the expression
             text and the second element is the translation quality.
         :rtype: list(tuple)
         """

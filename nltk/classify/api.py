@@ -1,9 +1,9 @@
 # Natural Language Toolkit: Classifier Interface
 #
-# Copyright (C) 2001-2021 NLTK Project
+# Copyright (C) 2001-2026 NLTK Project
 # Author: Edward Loper <edloper@gmail.com>
 #         Steven Bird <stevenbird1@gmail.com> (minor additions)
-# URL: <http://nltk.org/>
+# URL: <https://www.nltk.org/>
 # For license information, see LICENSE.TXT
 
 """
@@ -18,6 +18,7 @@ category.
 classification", which is like single-category classification except
 that each text belongs to zero or more categories.
 """
+
 from nltk.internals import overridden
 
 ##//////////////////////////////////////////////////////

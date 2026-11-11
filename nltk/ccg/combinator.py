@@ -1,8 +1,8 @@
 # Natural Language Toolkit: Combinatory Categorial Grammar
 #
-# Copyright (C) 2001-2021 NLTK Project
+# Copyright (C) 2001-2026 NLTK Project
 # Author: Graeme Gange <ggange@csse.unimelb.edu.au>
-# URL: <http://nltk.org/>
+# URL: <https://www.nltk.org/>
 # For license information, see LICENSE.TXT
 """
 CCG Combinators
@@ -110,7 +110,7 @@ class UndirectedFunctionApplication(UndirectedBinaryCombinator):
         if not function.is_function():
             return False
 
-        return not function.arg().can_unify(argument) is None
+        return function.arg().can_unify(argument) is not None
 
     def combine(self, function, argument):
         if not function.is_function():
@@ -127,6 +127,7 @@ class UndirectedFunctionApplication(UndirectedBinaryCombinator):
 
 
 # Predicates for function application.
+
 
 # Ensures the left functor takes an argument on the right
 def forwardOnly(left, right):
@@ -157,7 +158,7 @@ class UndirectedComposition(UndirectedBinaryCombinator):
         if not (function.is_function() and argument.is_function()):
             return False
         if function.dir().can_compose() and argument.dir().can_compose():
-            return not function.arg().can_unify(argument.res()) is None
+            return function.arg().can_unify(argument.res()) is not None
         return False
 
     def combine(self, function, argument):
@@ -288,16 +289,16 @@ class UndirectedTypeRaise(UndirectedBinaryCombinator):
         # X Y\X =>(<T) Y/(Y\X) Y\X =>(>) Y
         # which is equivalent to
         # X Y\X =>(<) Y
-        if not (arg.is_function() and arg.res().is_function()):
+        if not (
+            function.is_primitive() and arg.is_function() and arg.res().is_function()
+        ):
             return False
 
+        # Type-raising matches only the innermost application.
         arg = innermostFunction(arg)
 
-        # left, arg_categ are undefined!
-        subs = left.can_unify(arg_categ.arg())
-        if subs is not None:
-            return True
-        return False
+        subs = function.can_unify(arg.arg())
+        return subs is not None
 
     def combine(self, function, arg):
         if not (

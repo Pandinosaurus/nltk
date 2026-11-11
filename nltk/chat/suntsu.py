@@ -1,8 +1,8 @@
 # Natural Language Toolkit: Sun Tsu-Bot
 #
-# Copyright (C) 2001-2021 NLTK Project
+# Copyright (C) 2001-2026 NLTK Project
 # Author: Sam Huston 2007
-# URL: <http://nltk.org/>
+# URL: <https://www.nltk.org/>
 # For license information, see LICENSE.TXT
 
 """
@@ -11,10 +11,11 @@ Tsu bot responds to all queries with a Sun Tsu sayings
 Quoted from Sun Tsu's The Art of War
 Translated by LIONEL GILES, M.A. 1910
 Hosted by the Gutenberg Project
-http://www.gutenberg.org/
+https://www.gutenberg.org/
 """
 
 from nltk.chat.util import Chat, reflections
+from nltk.termsec import safe_print
 
 pairs = (
     (r"quit", ("Good-bye.", "Plan well", "May victory be your future")),
@@ -124,10 +125,10 @@ suntsu_chatbot = Chat(pairs, reflections)
 
 
 def suntsu_chat():
-    print("Talk to the program by typing in plain English, using normal upper-")
-    print('and lower-case letters and punctuation.  Enter "quit" when done.')
-    print("=" * 72)
-    print("You seek enlightenment?")
+    safe_print("Talk to the program by typing in plain English, using normal upper-")
+    safe_print('and lower-case letters and punctuation.  Enter "quit" when done.')
+    safe_print("=" * 72)
+    safe_print("You seek enlightenment?")
 
     suntsu_chatbot.converse()
 

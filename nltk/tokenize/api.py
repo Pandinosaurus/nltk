@@ -1,9 +1,9 @@
 # Natural Language Toolkit: Tokenizer Interface
 #
-# Copyright (C) 2001-2021 NLTK Project
+# Copyright (C) 2001-2026 NLTK Project
 # Author: Edward Loper <edloper@gmail.com>
 #         Steven Bird <stevenbird1@gmail.com>
-# URL: <http://nltk.org/>
+# URL: <https://www.nltk.org/>
 # For license information, see LICENSE.TXT
 
 """
@@ -11,6 +11,8 @@ Tokenizer Interface
 """
 
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
+from typing import List, Tuple
 
 from nltk.internals import overridden
 from nltk.tokenize.util import string_span_tokenize
@@ -23,41 +25,43 @@ class TokenizerI(ABC):
     """
 
     @abstractmethod
-    def tokenize(self, s):
+    def tokenize(self, s: str) -> list[str]:
         """
         Return a tokenized copy of *s*.
 
-        :rtype: list of str
+        :rtype: List[str]
         """
         if overridden(self.tokenize_sents):
             return self.tokenize_sents([s])[0]
 
-    def span_tokenize(self, s):
+    def span_tokenize(self, s: str) -> Iterator[tuple[int, int]]:
         """
         Identify the tokens using integer offsets ``(start_i, end_i)``,
         where ``s[start_i:end_i]`` is the corresponding token.
 
-        :rtype: iter(tuple(int, int))
+        :rtype: Iterator[Tuple[int, int]]
         """
         raise NotImplementedError()
 
-    def tokenize_sents(self, strings):
+    def tokenize_sents(self, strings: list[str]) -> list[list[str]]:
         """
         Apply ``self.tokenize()`` to each element of ``strings``.  I.e.:
 
             return [self.tokenize(s) for s in strings]
 
-        :rtype: list(list(str))
+        :rtype: List[List[str]]
         """
         return [self.tokenize(s) for s in strings]
 
-    def span_tokenize_sents(self, strings):
+    def span_tokenize_sents(
+        self, strings: list[str]
+    ) -> Iterator[list[tuple[int, int]]]:
         """
         Apply ``self.span_tokenize()`` to each element of ``strings``.  I.e.:
 
             return [self.span_tokenize(s) for s in strings]
 
-        :rtype: iter(list(tuple(int, int)))
+        :yield: List[Tuple[int, int]]
         """
         for s in strings:
             yield list(self.span_tokenize(s))

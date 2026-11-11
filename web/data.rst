@@ -1,9 +1,9 @@
 Installing NLTK Data
 ====================
 
-NLTK comes with many corpora, toy grammars, trained models, etc.   A complete list is posted at: http://nltk.org/nltk_data/
+NLTK comes with many corpora, toy grammars, trained models, etc.   A complete list is posted at: https://www.nltk.org/nltk_data/
 
-To install the data, first install NLTK (see http://nltk.org/install.html), then use NLTK's data downloader as described below.
+To install the data, first install NLTK (see https://www.nltk.org/install.html), then use NLTK's data downloader as described below.
 
 Apart from individual data packages, you can download the entire collection (using "all"), or just the data required for the examples and exercises in the book (using "book"), or just the corpora and no grammars or trained models (using "all-corpora").
 
@@ -40,7 +40,7 @@ Command line installation
 
 The downloader will search for an existing ``nltk_data`` directory to install NLTK data.  If one does not exist it will attempt to create one in a central location (when using an administrator account) or otherwise in the user's filespace.  If necessary, run the download command from an administrator account, or using sudo.  The recommended system location is ``C:\nltk_data`` (Windows); ``/usr/local/share/nltk_data`` (Mac); and ``/usr/share/nltk_data`` (Unix).  You can use the ``-d`` flag to specify a different location (but if you do this, be sure to set the ``NLTK_DATA`` environment variable accordingly).
 
-Run the command ``python -m nltk.downloader all``.  To ensure central installation, run the command ``sudo python -m nltk.downloader -d /usr/local/share/nltk_data all``.
+Run the command ``python -m nltk.downloader all``.  To ensure central installation, run the command ``sudo python -m nltk.downloader -d /usr/local/share/nltk_data all``.  A downloaded archive is private to the account that installed it, so a central installation, or a container image built as root and run as another user, is extracted for the accounts that will read it: an install made as root or outside your home directory does this on its own, and ``--extract`` / ``--no-extract`` decide explicitly. This also unpacks the packages that are otherwise read straight from their archive (``wordnet``, ``omw-1.4``), and the extracted files are what every other account is served. An installation made earlier can be completed by re-running the same command with ``--extract``.
 
 Windows: Use the "Run..." option on the Start menu.  Windows Vista users need to first turn on this option, using ``Start -> Properties -> Customize`` to check the box to activate the "Run..." option.
 
@@ -54,7 +54,7 @@ Create a folder ``nltk_data``, e.g. ``C:\nltk_data``, or ``/usr/local/share/nltk
 and subfolders ``chunkers``, ``grammars``, ``misc``, ``sentiment``, ``taggers``, ``corpora``,
 ``help``, ``models``, ``stemmers``, ``tokenizers``.
 
-Download individual packages from ``http://nltk.org/nltk_data/`` (see the "download" links).
+Download individual packages from ``https://www.nltk.org/nltk_data/`` (see the "download" links).
 Unzip them to the appropriate subfolder. For example, the Brown Corpus, found at:
 ``https://raw.githubusercontent.com/nltk/nltk_data/gh-pages/packages/corpora/brown.zip``
 is to be unzipped to ``nltk_data/corpora/brown``.

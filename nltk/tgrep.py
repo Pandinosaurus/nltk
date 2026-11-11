@@ -2,9 +2,9 @@
 #
 # Natural Language Toolkit: TGrep search
 #
-# Copyright (C) 2001-2021 NLTK Project
+# Copyright (C) 2001-2026 NLTK Project
 # Author: Will Roberts <wildwilhelm@gmail.com>
-# URL: <http://nltk.org/>
+# URL: <https://www.nltk.org/>
 # For license information, see LICENSE.TXT
 
 """
@@ -18,7 +18,7 @@ Note that many tgrep operators require the tree passed to be a
 
 External links:
 
-- `Tgrep tutorial <http://www.stanford.edu/dept/linguistics/corpora/cas-tut-tgrep.html>`_
+- `Tgrep tutorial <https://www.stanford.edu/dept/linguistics/corpora/cas-tut-tgrep.html>`_
 - `Tgrep2 manual <http://tedlab.mit.edu/~dr/Tgrep2/tgrep2.pdf>`_
 - `Tgrep2 source <http://tedlab.mit.edu/~dr/Tgrep2/>`_
 
@@ -110,15 +110,18 @@ macro definitions to ``m`` and initialises ``l`` to an empty dictionary.
 """
 
 import functools
-import re
+
+# Bound before the optional-dependency check below, whose fallback prints.
+from nltk.termsec import safe_print
 
 try:
     import pyparsing
 except ImportError:
-    print("Warning: nltk.tgrep will not work without the `pyparsing` package")
-    print("installed.")
+    safe_print("Warning: nltk.tgrep will not work without the `pyparsing` package")
+    safe_print("installed.")
 
 import nltk.tree
+from nltk import redos
 
 
 class TgrepException(Exception):
@@ -350,16 +353,29 @@ def _tgrep_node_action(_s, _l, tokens):
         elif tokens[0].startswith("/"):
             assert tokens[0].endswith("/")
             node_lit = tokens[0][1:-1]
+            # The ``/regex/`` node literal comes straight from the (untrusted)
+            # tgrep query and is searched against every node label. Compile it
+            # through ``redos`` so a crafted literal (e.g. ``/(a|a)*$/``) is
+            # bounded by a wall-clock timeout instead of hanging the search
+            # (CWE-1333). See ``nltk/redos.py``.
+            try:
+                node_rx = redos.compile(node_lit)
+            except (ValueError, redos.error) as exc:
+                # redos refuses an oversized/over-nested /regex/ literal; surface
+                # it as a query error rather than an uncaught refusal.
+                raise TgrepException(
+                    f"invalid or oversized /regex/ node literal {node_lit!r}: {exc}"
+                ) from None
             return (
-                lambda r: lambda n, m=None, l=None: r.search(
-                    _tgrep_node_literal_value(n)
+                lambda r: (
+                    lambda n, m=None, l=None: r.search(_tgrep_node_literal_value(n))
                 )
-            )(re.compile(node_lit))
+            )(node_rx)
         elif tokens[0].startswith("i@"):
             node_func = _tgrep_node_action(_s, _l, [tokens[0][2:].lower()])
             return (
-                lambda f: lambda n, m=None, l=None: f(
-                    _tgrep_node_literal_value(n).lower()
+                lambda f: (
+                    lambda n, m=None, l=None: f(_tgrep_node_literal_value(n).lower())
                 )
             )(node_func)
         else:
@@ -389,8 +405,10 @@ def _tgrep_nltk_tree_pos_action(_s, _l, tokens):
     node_tree_position = tuple(int(x) for x in tokens if x.isdigit())
     # capture the node's tree position
     return (
-        lambda i: lambda n, m=None, l=None: (
-            hasattr(n, "treeposition") and n.treeposition() == i
+        lambda i: (
+            lambda n, m=None, l=None: (
+                hasattr(n, "treeposition") and n.treeposition() == i
+            )
         )
     )(node_tree_position)
 
@@ -444,11 +462,13 @@ def _tgrep_relation_action(_s, _l, tokens):
             idx = int(operator[1:])
             # capture the index parameter
             retval = (
-                lambda i: lambda n, m=None, l=None: (
-                    _istree(n)
-                    and bool(list(n))
-                    and 0 <= i < len(n)
-                    and predicate(n[i], m, l)
+                lambda i: (
+                    lambda n, m=None, l=None: (
+                        _istree(n)
+                        and bool(list(n))
+                        and 0 <= i < len(n)
+                        and predicate(n[i], m, l)
+                    )
                 )
             )(idx - 1)
         # A >N B      A is the Nth child of B (the first child is >1).
@@ -456,12 +476,14 @@ def _tgrep_relation_action(_s, _l, tokens):
             idx = int(operator[1:])
             # capture the index parameter
             retval = (
-                lambda i: lambda n, m=None, l=None: (
-                    hasattr(n, "parent")
-                    and bool(n.parent())
-                    and 0 <= i < len(n.parent())
-                    and (n is n.parent()[i])
-                    and predicate(n.parent(), m, l)
+                lambda i: (
+                    lambda n, m=None, l=None: (
+                        hasattr(n, "parent")
+                        and bool(n.parent())
+                        and 0 <= i < len(n.parent())
+                        and (n is n.parent()[i])
+                        and predicate(n.parent(), m, l)
+                    )
                 )
             )(idx - 1)
         # A <' B      B is the last child of A (also synonymous with A <-1 B).
@@ -484,11 +506,13 @@ def _tgrep_relation_action(_s, _l, tokens):
             idx = -int(operator[2:])
             # capture the index parameter
             retval = (
-                lambda i: lambda n, m=None, l=None: (
-                    _istree(n)
-                    and bool(list(n))
-                    and 0 <= (i + len(n)) < len(n)
-                    and predicate(n[i + len(n)], m, l)
+                lambda i: (
+                    lambda n, m=None, l=None: (
+                        _istree(n)
+                        and bool(list(n))
+                        and 0 <= (i + len(n)) < len(n)
+                        and predicate(n[i + len(n)], m, l)
+                    )
                 )
             )(idx)
         # A >-N B 	  A is the N th-to-last child of B (the last child is >-1).
@@ -496,12 +520,14 @@ def _tgrep_relation_action(_s, _l, tokens):
             idx = -int(operator[2:])
             # capture the index parameter
             retval = (
-                lambda i: lambda n, m=None, l=None: (
-                    hasattr(n, "parent")
-                    and bool(n.parent())
-                    and 0 <= (i + len(n.parent())) < len(n.parent())
-                    and (n is n.parent()[i + len(n.parent())])
-                    and predicate(n.parent(), m, l)
+                lambda i: (
+                    lambda n, m=None, l=None: (
+                        hasattr(n, "parent")
+                        and bool(n.parent())
+                        and 0 <= (i + len(n.parent())) < len(n.parent())
+                        and (n is n.parent()[i + len(n.parent())])
+                        and predicate(n.parent(), m, l)
+                    )
                 )
             )(idx)
         # A <: B      B is the only child of A
@@ -621,7 +647,7 @@ def _tgrep_relation_action(_s, _l, tokens):
             raise TgrepException(f'cannot interpret tgrep operator "{operator}"')
     # now return the built function
     if negated:
-        return (lambda r: (lambda n, m=None, l=None: not r(n, m, l)))(retval)
+        return (lambda r: lambda n, m=None, l=None: not r(n, m, l))(retval)
     else:
         return retval
 
@@ -655,8 +681,8 @@ def _tgrep_conjunction_action(_s, _l, tokens, join_char="&"):
         return tokens[0]
     else:
         return (
-            lambda ts: lambda n, m=None, l=None: all(
-                predicate(n, m, l) for predicate in ts
+            lambda ts: (
+                lambda n, m=None, l=None: all(predicate(n, m, l) for predicate in ts)
             )
         )(tokens)
 
@@ -836,6 +862,7 @@ def _tgrep_exprs_action(_s, _l, tokens):
         macro_dict.update(macro_def)
     # collect all tgrep expressions
     tgrep_exprs = [tok for tok in tokens if not isinstance(tok, dict)]
+
     # create a new scope for the node label dictionary
     def top_level_pred(n, m=macro_dict, l=None):
         label_dict = {}
@@ -949,6 +976,28 @@ def _build_tgrep_parser(set_parse_actions=True):
     return tgrep_exprs.ignore("#" + pyparsing.restOfLine)
 
 
+#: Maximum bracket/paren nesting accepted in a TGrep pattern. pyparsing parses
+#: ``(``/``[`` groups recursively and overflows the stack on deep input
+#: (CWE-674), so a deeper pattern is refused with a clear ValueError.
+MAX_TGREP_DEPTH = 50
+
+
+def _check_tgrep_nesting(tgrep_string):
+    # Iterative scan, so it runs before the recursive parser regardless of the
+    # ambient recursion limit.
+    depth = 0
+    for char in tgrep_string:
+        if char in "([":
+            depth += 1
+            if depth > MAX_TGREP_DEPTH:
+                raise ValueError(
+                    f"TGrep nesting depth exceeds MAX_TGREP_DEPTH "
+                    f"({MAX_TGREP_DEPTH}); the pattern may be adversarially deep."
+                )
+        elif char in ")]" and depth > 0:
+            depth -= 1
+
+
 def tgrep_tokenize(tgrep_string):
     """
     Tokenizes a TGrep search string into separate tokens.
@@ -956,6 +1005,7 @@ def tgrep_tokenize(tgrep_string):
     parser = _build_tgrep_parser(False)
     if isinstance(tgrep_string, bytes):
         tgrep_string = tgrep_string.decode()
+    _check_tgrep_nesting(tgrep_string)
     return list(parser.parseString(tgrep_string))
 
 
@@ -967,6 +1017,7 @@ def tgrep_compile(tgrep_string):
     parser = _build_tgrep_parser(True)
     if isinstance(tgrep_string, bytes):
         tgrep_string = tgrep_string.decode()
+    _check_tgrep_nesting(tgrep_string)
     return list(parser.parseString(tgrep_string, parseAll=True))[0]
 
 

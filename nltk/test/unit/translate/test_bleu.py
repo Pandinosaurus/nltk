@@ -2,10 +2,11 @@
 Tests for BLEU translation evaluation metric
 """
 
-import io
 import unittest
 
-from nltk.data import find
+import pytest
+
+from nltk.data import find, open_datafile
 from nltk.translate.bleu_score import (
     SmoothingFunction,
     brevity_penalty,
@@ -20,7 +21,7 @@ class TestBLEU(unittest.TestCase):
     def test_modified_precision(self):
         """
         Examples from the original BLEU paper
-        http://www.aclweb.org/anthology/P02-1040.pdf
+        https://www.aclweb.org/anthology/P02-1040.pdf
         """
         # Example 1: the "the*" example.
         # Reference sentences.
@@ -120,7 +121,7 @@ class TestBLEU(unittest.TestCase):
 
         # Test BLEU to nth order of n-grams, where n is len(hypothesis).
         for n in range(1, len(hypothesis)):
-            weights = [1.0 / n] * n  # Uniform weights.
+            weights = (1.0 / n,) * n  # Uniform weights.
             assert sentence_bleu(references, hypothesis, weights) == 0
 
     def test_full_matches(self):
@@ -130,7 +131,7 @@ class TestBLEU(unittest.TestCase):
 
         # Test BLEU to nth order of n-grams, where n is len(hypothesis).
         for n in range(1, len(hypothesis)):
-            weights = [1.0 / n] * n  # Uniform weights.
+            weights = (1.0 / n,) * n  # Uniform weights.
             assert sentence_bleu(references, hypothesis, weights) == 1.0
 
     def test_partial_matches_hypothesis_longer_than_reference(self):
@@ -153,7 +154,7 @@ class TestBLEUFringeCases(unittest.TestCase):
         references = ["John loves Mary ?".split()]
         hypothesis = "John loves Mary".split()
         n = len(hypothesis) + 1  #
-        weights = [1.0 / n] * n  # Uniform weights.
+        weights = (1.0 / n,) * n  # Uniform weights.
         # Since no n-grams matches were found the result should be zero
         # exp(w_1 * 1 * w_2 * 1 * w_3 * 1 * w_4 * -inf) = 0
         self.assertAlmostEqual(
@@ -181,6 +182,16 @@ class TestBLEUFringeCases(unittest.TestCase):
         hypothesis = []
         assert sentence_bleu(references, hypothesis) == 0
 
+    def test_length_one_hypothesis(self):
+        # Test case where there's hypothesis is of length 1 in Smoothing method 4.
+        references = ["The candidate has no alignment to any of the references".split()]
+        hypothesis = ["Foo"]
+        method4 = SmoothingFunction().method4
+        try:
+            sentence_bleu(references, hypothesis, smoothing_function=method4)
+        except ValueError:
+            pass  # unittest.TestCase.assertWarns is only supported in Python >= 3.2.
+
     def test_empty_references(self):
         # Test case where there's reference is empty.
         references = [[]]
@@ -207,6 +218,16 @@ class TestBLEUFringeCases(unittest.TestCase):
         except AttributeError:
             pass  # unittest.TestCase.assertWarns is only supported in Python >= 3.2.
 
+    def test_numpy_weights(self):
+        # numpy is required for the test execution
+        np = pytest.importorskip("numpy")
+        # Test case where there's 0 matches
+        references = ["The candidate has no alignment to any of the references".split()]
+        hypothesis = "John loves Mary".split()
+
+        weights = np.array([0.25] * 4)
+        assert sentence_bleu(references, hypothesis, weights) == 0
+
 
 class TestBLEUvsMteval13a(unittest.TestCase):
     def test_corpus_bleu(self):
@@ -216,13 +237,13 @@ class TestBLEUvsMteval13a(unittest.TestCase):
 
         # Reads the BLEU scores from the `mteval-13a.output` file.
         # The order of the list corresponds to the order of the ngrams.
-        with open(mteval_output_file) as mteval_fin:
+        with open_datafile(mteval_output_file) as mteval_fin:
             # The numbers are located in the last 2nd line of the file.
             # The first and 2nd item in the list are the score and system names.
             mteval_bleu_scores = map(float, mteval_fin.readlines()[-2].split()[1:-1])
 
-        with open(ref_file, encoding="utf8") as ref_fin:
-            with open(hyp_file, encoding="utf8") as hyp_fin:
+        with open_datafile(ref_file, encoding="utf8") as ref_fin:
+            with open_datafile(hyp_file, encoding="utf8") as hyp_fin:
                 # Whitespace tokenize the file.
                 # Note: split() automatically strip().
                 hypothesis = list(map(lambda x: x.split(), hyp_fin))
@@ -267,5 +288,131 @@ class TestBLEUWithBadSentence(unittest.TestCase):
                 self.assertAlmostEqual(
                     corpus_bleu(references, hypotheses), 0.0, places=4
                 )
-        except AttributeError:  # unittest.TestCase.assertWarns is only supported in Python >= 3.2.
+        except (
+            AttributeError
+        ):  # unittest.TestCase.assertWarns is only supported in Python >= 3.2.
             self.assertAlmostEqual(corpus_bleu(references, hypotheses), 0.0, places=4)
+
+
+class TestBLEUWithMultipleWeights(unittest.TestCase):
+    def test_corpus_bleu_with_multiple_weights(self):
+        hyp1 = [
+            "It",
+            "is",
+            "a",
+            "guide",
+            "to",
+            "action",
+            "which",
+            "ensures",
+            "that",
+            "the",
+            "military",
+            "always",
+            "obeys",
+            "the",
+            "commands",
+            "of",
+            "the",
+            "party",
+        ]
+        ref1a = [
+            "It",
+            "is",
+            "a",
+            "guide",
+            "to",
+            "action",
+            "that",
+            "ensures",
+            "that",
+            "the",
+            "military",
+            "will",
+            "forever",
+            "heed",
+            "Party",
+            "commands",
+        ]
+        ref1b = [
+            "It",
+            "is",
+            "the",
+            "guiding",
+            "principle",
+            "which",
+            "guarantees",
+            "the",
+            "military",
+            "forces",
+            "always",
+            "being",
+            "under",
+            "the",
+            "command",
+            "of",
+            "the",
+            "Party",
+        ]
+        ref1c = [
+            "It",
+            "is",
+            "the",
+            "practical",
+            "guide",
+            "for",
+            "the",
+            "army",
+            "always",
+            "to",
+            "heed",
+            "the",
+            "directions",
+            "of",
+            "the",
+            "party",
+        ]
+        hyp2 = [
+            "he",
+            "read",
+            "the",
+            "book",
+            "because",
+            "he",
+            "was",
+            "interested",
+            "in",
+            "world",
+            "history",
+        ]
+        ref2a = [
+            "he",
+            "was",
+            "interested",
+            "in",
+            "world",
+            "history",
+            "because",
+            "he",
+            "read",
+            "the",
+            "book",
+        ]
+        weight_1 = (1, 0, 0, 0)
+        weight_2 = (0.25, 0.25, 0.25, 0.25)
+        weight_3 = (0, 0, 0, 0, 1)
+
+        bleu_scores = corpus_bleu(
+            list_of_references=[[ref1a, ref1b, ref1c], [ref2a]],
+            hypotheses=[hyp1, hyp2],
+            weights=[weight_1, weight_2, weight_3],
+        )
+        assert bleu_scores[0] == corpus_bleu(
+            [[ref1a, ref1b, ref1c], [ref2a]], [hyp1, hyp2], weight_1
+        )
+        assert bleu_scores[1] == corpus_bleu(
+            [[ref1a, ref1b, ref1c], [ref2a]], [hyp1, hyp2], weight_2
+        )
+        assert bleu_scores[2] == corpus_bleu(
+            [[ref1a, ref1b, ref1c], [ref2a]], [hyp1, hyp2], weight_3
+        )

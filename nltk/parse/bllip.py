@@ -2,11 +2,17 @@
 #
 # Author: David McClosky <dmcc@bigasterisk.com>
 #
-# Copyright (C) 2001-2021 NLTK Project
-# URL: <http://nltk.org/>
+# Copyright (C) 2001-2026 NLTK Project
+# URL: <https://www.nltk.org/>
 # For license information, see LICENSE.TXT
 
 from nltk.parse.api import ParserI
+from nltk.pathsec import (
+    MAX_TOOL_MODEL_BYTES,
+    validate_tool_dir,
+    validate_tool_path,
+)
+from nltk.termsec import safe_print
 from nltk.tree import Tree
 
 """
@@ -75,7 +81,7 @@ uses a SWIG interface, it is potentially unsafe to create multiple
 ``BllipParser`` objects in the same process. BLLIP Parser currently
 has issues with non-ASCII text and will raise an error if given any.
 
-See http://pypi.python.org/pypi/bllipparser/ for more information
+See https://pypi.python.org/pypi/bllipparser/ for more information
 on BLLIP Parser's Python interface.
 """
 
@@ -90,21 +96,23 @@ try:
     def _ensure_bllip_import_or_error():
         pass
 
-
 except ImportError as ie:
+    _bllip_import_error_message = str(ie)
 
-    def _ensure_bllip_import_or_error(ie=ie):
-        raise ImportError("Couldn't import bllipparser module: %s" % ie)
+    def _ensure_bllip_import_or_error():
+        raise ImportError(
+            "Couldn't import bllipparser module: %s" % _bllip_import_error_message
+        )
 
 
 def _ensure_ascii(words):
     try:
         for i, word in enumerate(words):
-            word.decode("ascii")
-    except UnicodeDecodeError as e:
+            word.encode("ascii")
+    except UnicodeEncodeError as e:
         raise ValueError(
-            "Token %d (%r) is non-ASCII. BLLIP Parser "
-            "currently doesn't support non-ASCII inputs." % (i, word)
+            f"Token {i} ({word!r}) is non-ASCII. BLLIP Parser "
+            "currently doesn't support non-ASCII inputs."
         ) from e
 
 
@@ -142,14 +150,14 @@ class BllipParser(ParserI):
         :type reranker_weights: str
 
         :param parser_options: optional dictionary of parser options, see
-        ``bllipparser.RerankingParser.RerankingParser.load_parser_options()``
-        for more information.
+            ``bllipparser.RerankingParser.RerankingParser.load_parser_options()``
+            for more information.
         :type parser_options: dict(str)
 
         :param reranker_options: optional
-        dictionary of reranker options, see
-        ``bllipparser.RerankingParser.RerankingParser.load_reranker_model()``
-        for more information.
+            dictionary of reranker options, see
+            ``bllipparser.RerankingParser.RerankingParser.load_reranker_model()``
+            for more information.
         :type reranker_options: dict(str)
         """
         _ensure_bllip_import_or_error()
@@ -157,13 +165,36 @@ class BllipParser(ParserI):
         parser_options = parser_options or {}
         reranker_options = reranker_options or {}
 
+        # The extension opens these caller paths natively, so bound them to the
+        # data roots first and pass the returned string, never the original
+        # object (GHSA-fg9w-wfp5-j933).
+        if parser_model is not None:
+            parser_model = validate_tool_dir(
+                parser_model,
+                context="BllipParser parser model",
+                require_private=True,
+            )
+        if reranker_features and reranker_weights:
+            reranker_features = validate_tool_path(
+                reranker_features,
+                context="BllipParser reranker features",
+                max_bytes=MAX_TOOL_MODEL_BYTES,
+                require_private=True,
+            )
+            reranker_weights = validate_tool_path(
+                reranker_weights,
+                context="BllipParser reranker weights",
+                max_bytes=MAX_TOOL_MODEL_BYTES,
+                require_private=True,
+            )
+
         self.rrp = RerankingParser()
         self.rrp.load_parser_model(parser_model, **parser_options)
         if reranker_features and reranker_weights:
             self.rrp.load_reranker_model(
                 features_filename=reranker_features,
                 weights_filename=reranker_weights,
-                **reranker_options
+                **reranker_options,
             )
 
     def parse(self, sentence):
@@ -173,7 +204,7 @@ class BllipParser(ParserI):
         instance's tagger.
 
         :return: An iterator that generates parse trees for the sentence
-        from most likely to least likely.
+            from most likely to least likely.
 
         :param sentence: The sentence to be parsed
         :type sentence: list(str)
@@ -194,7 +225,7 @@ class BllipParser(ParserI):
         to leave a token's tag unconstrained.
 
         :return: An iterator that generates parse trees for the sentence
-        from most likely to least likely.
+            from most likely to least likely.
 
         :param sentence: Input sentence to parse as (word, tag) pairs
         :type sentence: list(tuple(str, str))
@@ -224,20 +255,27 @@ class BllipParser(ParserI):
         for more information about unified model directories.
 
         :return: A ``BllipParser`` object using the parser and reranker
-        models in the model directory.
+            models in the model directory.
 
         :param model_dir: Path to the unified model directory.
         :type model_dir: str
         :param parser_options: optional dictionary of parser options, see
-        ``bllipparser.RerankingParser.RerankingParser.load_parser_options()``
-        for more information.
+            ``bllipparser.RerankingParser.RerankingParser.load_parser_options()``
+            for more information.
         :type parser_options: dict(str)
         :param reranker_options: optional dictionary of reranker options, see
-        ``bllipparser.RerankingParser.RerankingParser.load_reranker_model()``
-        for more information.
+            ``bllipparser.RerankingParser.RerankingParser.load_reranker_model()``
+            for more information.
         :type reranker_options: dict(str)
         :rtype: BllipParser
         """
+        # The third-party helper derives sub-paths under model_dir unchecked, so
+        # bound model_dir first; the constructor revalidates each derived path.
+        model_dir = validate_tool_dir(
+            model_dir,
+            context="BllipParser unified model directory",
+            require_private=True,
+        )
         (
             parser_model_dir,
             reranker_features_filename,
@@ -262,39 +300,39 @@ def demo():
 
     model_dir = find("models/bllip_wsj_no_aux").path
 
-    print("Loading BLLIP Parsing models...")
+    safe_print("Loading BLLIP Parsing models...")
     # the easiest way to get started is to use a unified model
     bllip = BllipParser.from_unified_model_dir(model_dir)
-    print("Done.")
+    safe_print("Done.")
 
     sentence1 = "British left waffles on Falklands .".split()
     sentence2 = "I saw the man with the telescope .".split()
     # this sentence is known to fail under the WSJ parsing model
     fail1 = "# ! ? : -".split()
     for sentence in (sentence1, sentence2, fail1):
-        print("Sentence: %r" % " ".join(sentence))
+        safe_print("Sentence: %r" % " ".join(sentence))
         try:
             tree = next(bllip.parse(sentence))
-            print(tree)
+            safe_print(tree)
         except StopIteration:
-            print("(parse failed)")
+            safe_print("(parse failed)")
 
     # n-best parsing demo
     for i, parse in enumerate(bllip.parse(sentence1)):
-        print("parse %d:\n%s" % (i, parse))
+        safe_print("parse %d:\n%s" % (i, parse))
 
     # using external POS tag constraints
-    print(
+    safe_print(
         "forcing 'tree' to be 'NN':",
         next(bllip.tagged_parse([("A", None), ("tree", "NN")])),
     )
-    print(
+    safe_print(
         "forcing 'A' to be 'DT' and 'tree' to be 'NNP':",
         next(bllip.tagged_parse([("A", "DT"), ("tree", "NNP")])),
     )
     # constraints don't have to make sense... (though on more complicated
     # sentences, they may cause the parse to fail)
-    print(
+    safe_print(
         "forcing 'A' to be 'NNP':",
         next(bllip.tagged_parse([("A", "NNP"), ("tree", None)])),
     )
